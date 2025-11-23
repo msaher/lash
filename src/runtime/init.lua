@@ -1,6 +1,7 @@
 -- initialized once lash runs
 -- lots of functions taken from neovim's stdlib
 -- TODO: add license if needed
+
 lash.inspect = require("inspect")
 
 local function _print(inspect_strings, ...)

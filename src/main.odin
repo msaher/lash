@@ -5,6 +5,7 @@ import "core:flags"
 import "core:strings"
 import os "core:os/os2"
 import lua "luajit"
+import "luv"
 
 USAGE :: "run FILENAME"
 
@@ -33,6 +34,12 @@ entry_point :: proc() -> int {
     lua.pushfstring(L, "%s;%s", old, "src/runtime/?.lua") // [package, new_path]
     lua.setfield(L, -2, "path")                           // [package]
     lua.pop(L, 1)                                         // []
+
+    // lash.uv
+    lua.getglobal(L, "lash");   // [lash]
+    luv.open_luv(L);            // pushes uv. [lash, uv]
+    lua.pushvalue(L, -1);       // [lash, uv, uv]
+    lua.setfield(L, -3, "uv");  // [lash, uv]
 
     // evaluate init.lua
     status := lua.L_dofile(L, "src/runtime/init.lua");
