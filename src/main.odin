@@ -8,10 +8,10 @@ import lua "luajit"
 
 USAGE :: "run FILENAME"
 
-main :: proc() {
+entry_point :: proc() -> int {
     if len(os.args) != 3 || os.args[1] != "run" {
         fmt.eprintf("usage: %s %s\n", os.args[0], USAGE);
-        os.exit(1)
+        return 1
     }
     filename := strings.unsafe_string_to_cstring(os.args[2])
 
@@ -20,11 +20,38 @@ main :: proc() {
 
     lua.L_openlibs(L)
 
-    status := lua.L_dofile(L, filename)
+    // define lash global table
+    lua.newtable(L);
+    lua.setglobal(L, "lash");
+
+    // add runtime to path
+    // package.path = "src/runtime/?.lua;" .. package.path
+    lua.getglobal(L, "package")                           // [package]
+    lua.getfield(L, -1, "path")                           // [package, path]
+    old := lua.tostring(L, -1)
+    lua.pop(L, 1)                                         // [package]
+    lua.pushfstring(L, "%s;%s", old, "src/runtime/?.lua") // [package, new_path]
+    lua.setfield(L, -2, "path")                           // [package]
+    lua.pop(L, 1)                                         // []
+
+    // evaluate init.lua
+    status := lua.L_dofile(L, "src/runtime/init.lua");
     if status != .OK {
         fmt.eprintf("%s\n", lua.tostring(L, -1)); // show error
-        os.exit(1)
+        return 1
     }
 
-    fmt.println(lua.Status.OK)
+    // evaluate file
+    status = lua.L_dofile(L, filename)
+    if status != .OK {
+        fmt.eprintf("%s\n", lua.tostring(L, -1)); // show error
+        return 1
+    }
+
+    return 0
+}
+
+// os.exit() ignores defer
+main :: proc() {
+    os.exit(entry_point())
 }
