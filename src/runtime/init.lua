@@ -3,6 +3,7 @@
 -- TODO: add license if needed
 
 lash.inspect = require("inspect")
+lash.proc = require("proc")
 
 local function _print(inspect_strings, ...)
   local msg = {}

@@ -41,6 +41,13 @@ entry_point :: proc() -> int {
     lua.pushvalue(L, -1);       // [lash, uv, uv]
     lua.setfield(L, -3, "uv");  // [lash, uv]
 
+    // package.loaded.uv
+    lua.getglobal(L, "package");   // [lash, uv, package]
+    lua.getfield(L, -1, "loaded"); // [lash, uv, package, loaded]
+    lua.pushvalue(L, -3);          // [lash, uv, package, loaded, uv]
+    lua.setfield(L, -2, "luv");    // [lash, uv, package, loaded]
+    lua.pop(L, 3);                 // [lash]
+
     // evaluate init.lua
     status := lua.L_dofile(L, "src/runtime/init.lua");
     if status != .OK {
