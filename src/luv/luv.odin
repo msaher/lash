@@ -3,7 +3,7 @@ package luv
 import lua "../luajit"
 import "core:c"
 
-foreign import luv "../vendor-luv/build/libluv.a"
+foreign import luv {"../vendor-luv/build/libluv.a", "../vendor-luv/build/deps/libuv/libuv.a"}
 
 @(link_prefix="lua")
 @(default_calling_convention="c")
