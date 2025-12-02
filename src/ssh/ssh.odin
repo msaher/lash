@@ -11,6 +11,8 @@ foreign import ssh {
     "system:z",
 }
 
+#assert(size_of(c.int) == size_of(b32))
+
 Mode :: c.int
 
 Counter_Struct :: struct {
@@ -375,20 +377,20 @@ foreign ssh {
 	@(deprecated="Please use ssh_channel_exit_state()")
 	channel_get_exit_status		    :: proc(channel: Channel) -> c.int ---
 	channel_get_session				:: proc(channel: Channel) -> Session ---
-	channel_is_closed				:: proc(channel: Channel) -> c.int ---
-	channel_is_eof					:: proc(channel: Channel) -> c.int ---
-	channel_is_open					:: proc(channel: Channel) -> c.int ---
+	channel_is_closed				:: proc(channel: Channel) -> b32 ---
+	channel_is_eof					:: proc(channel: Channel) -> b32 ---
+	channel_is_open					:: proc(channel: Channel) -> b32 ---
 	channel_new						:: proc(session: Session) -> Channel ---
 	channel_open_auth_agent			:: proc(channel: Channel) -> c.int ---
 	channel_open_forward			:: proc(channel: Channel, remotehost: cstring, remoteport: c.int, sourcehost: cstring, localport: c.int) -> c.int ---
 	channel_open_forward_unix		:: proc(channel: Channel, remotepath: cstring, sourcehost: cstring, localport: c.int) -> c.int ---
 	channel_open_session			:: proc(channel: Channel) -> c.int ---
 	channel_open_x11				:: proc(channel: Channel, orig_addr: cstring, orig_port: c.int) -> c.int ---
-	channel_poll					:: proc(channel: Channel, is_stderr: c.int) -> c.int ---
-	channel_poll_timeout			:: proc(channel: Channel, timeout: c.int, is_stderr: c.int) -> c.int ---
-	channel_read					:: proc(channel: Channel, dest: rawptr, count: c.uint32_t, is_stderr: c.int) -> c.int ---
-	channel_read_timeout			:: proc(channel: Channel, dest: rawptr, count: c.uint32_t, is_stderr: c.int, timeout_ms: c.int) -> c.int ---
-	channel_read_nonblocking		:: proc(channel: Channel, dest: rawptr, count: c.uint32_t, is_stderr: c.int) -> c.int ---
+	channel_poll					:: proc(channel: Channel, is_stderr: b32) -> c.int ---
+	channel_poll_timeout			:: proc(channel: Channel, timeout: c.int, is_stderr: b32) -> c.int ---
+	channel_read					:: proc(channel: Channel, dest: rawptr, count: c.uint32_t, is_stderr: b32) -> c.int ---
+	channel_read_timeout			:: proc(channel: Channel, dest: rawptr, count: c.uint32_t, is_stderr: b32, timeout_ms: c.int) -> c.int ---
+	channel_read_nonblocking		:: proc(channel: Channel, dest: rawptr, count: c.uint32_t, is_stderr: b32) -> c.int ---
     channel_request_env				:: proc(channel: Channel, name: cstring, value: cstring) -> c.int ---
 	channel_request_exec			:: proc(channel: Channel, cmd: cstring) -> c.int ---
 	channel_request_pty				:: proc(channel: Channel) -> c.int ---
@@ -493,8 +495,8 @@ foreign ssh {
 	get_status     :: proc(session: Session) -> c.int ---
 	get_poll_flags :: proc(session: Session) -> c.int ---
 	init           :: proc() -> c.int ---
-	is_blocking    :: proc(session: Session) -> c.int ---
-	is_connected   :: proc(session: Session) -> c.int ---
+	is_blocking    :: proc(session: Session) -> b32 ---
+	is_connected   :: proc(session: Session) -> b32 ---
 
 	/* KNOWN HOSTS */
 	knownhosts_entry_free :: proc(entry: ^Knownhosts_Entry) ---
@@ -594,8 +596,8 @@ foreign ssh {
     key_type           :: proc(key: Key) -> Keytypes ---
     key_type_to_char   :: proc(type: Keytypes) -> cstring ---
     key_type_from_name :: proc(name: cstring) -> Keytypes ---
-    key_is_public      :: proc(k: Key) -> c.int ---
-    key_is_private     :: proc(k: Key) -> c.int ---
+    key_is_public      :: proc(k: Key) -> b32 ---
+    key_is_private     :: proc(k: Key) -> b32 ---
     key_cmp            :: proc(k1: Key, k2: Key, what: Keycmp) -> c.int ---
     key_dup            :: proc(key: Key) -> Key ---
 
