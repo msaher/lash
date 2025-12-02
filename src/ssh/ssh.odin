@@ -578,7 +578,7 @@ MESSAGE_FREE :: #force_inline proc "c" (x: ^Message) {
  *
  * @return              0 on success, < 0 on error.
  */
-Auth_Callback :: #type proc(prompt: cstring, buf: ^u8, _len: c.size_t, echo: c.int, verify: c.int, userdata: rawptr) -> c.int
+Auth_Callback :: #type proc "c" (prompt: cstring, buf: ^u8, _len: c.size_t, echo: c.int, verify: c.int, userdata: rawptr) -> c.int
 
 File_Format :: enum c.int {
     DEFAULT = 0,
@@ -674,7 +674,7 @@ foreign ssh {
     getpass :: proc(prompt: cstring, buf: [^]u8, len: c.size_t, echo: c.int, verify: c.int) -> c.int ---
 }
 
-Event_Callback :: #type proc(fd: Socket, revents: c.int, userdata: rawptr) -> c.int
+Event_Callback :: #type proc "c" (fd: Socket, revents: c.int, userdata: rawptr) -> c.int
 
 @(link_prefix="ssh_")
 @(default_calling_convention="c")
