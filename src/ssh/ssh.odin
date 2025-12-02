@@ -1,8 +1,6 @@
 package ssh
 import "core:c"
 
-// TODO: bind deprecated functions
-
 foreign import ssh {
     "../libssh-0.11.3/build/src/libssh.a",
     "system:ssl",
@@ -36,7 +34,6 @@ String :: distinct rawptr
 Event :: distinct rawptr
 Connector :: distinct rawptr
 Gssapi_Creds :: distinct rawptr
-
 
 INVALID_SOCKET :: Socket(-1)
 
@@ -455,40 +452,99 @@ Publickey_Hash_Type :: enum c.int {
 @(link_prefix="ssh_")
 @(default_calling_convention="c")
 foreign ssh {
-
     get_publickey_hash :: proc(key: Key, type: Publickey_Hash_Type, hash: ^[^]u8, hlen: ^c.size_t ) -> c.int ---
 
 	/* DEPRECATED FUNCTIONS */
     @(deprecated="Use ssh_get_publickey_hash()")
-	get_pubkey_hash :: proc(session: Session, hash: ^[^]u8) -> c.int ---
-	// forward_accept(Session session, c.int timeout_ms) -> SSH_DEPRECATED Channel ---
-	// forward_cancel(Session session, cstring address, c.int port) -> SSH_DEPRECATED c.int ---
-	// forward_listen(Session session, cstring address, c.int port, c.int ^bound_port) -> SSH_DEPRECATED c.int ---
-	// get_publickey(Session session, ssh_key ^key) -> SSH_DEPRECATED c.int ---
-	// write_knownhost(Session session) -> SSH_DEPRECATED c.int ---
-	// ^dump_knownhost(Session session) -> SSH_DEPRECATED char ---
-	// is_server_known(Session session) -> SSH_DEPRECATED c.int ---
-	// print_hexa(cstring descr, const unsigned char ^what, c.size_t len) -> SSH_DEPRECATED void ---
-	// channel_select(Channel ^readchans, ssh_channel ^writechans, ssh_channel ^exceptchans, struct timeval * timeout) -> SSH_DEPRECATED c.int ---
-	//
-	// scp_accept_request(ssh_scp scp) -> SSH_DEPRECATED c.int ---
-	// scp_close(ssh_scp scp) -> SSH_DEPRECATED c.int ---
-	// scp_deny_request(ssh_scp scp, cstring reason) -> SSH_DEPRECATED c.int ---
-	// scp_free(ssh_scp scp) -> SSH_DEPRECATED void ---
-	// scp_init(ssh_scp scp) -> SSH_DEPRECATED c.int ---
-	// scp_leave_directory(ssh_scp scp) -> SSH_DEPRECATED c.int ---
-	// scp_new(Session session, c.int mode, cstring location) -> SSH_DEPRECATED ssh_scp ---
-	// scp_pull_request(ssh_scp scp) -> SSH_DEPRECATED c.int ---
-	// scp_push_directory(ssh_scp scp, cstring dirname, c.int mode) -> SSH_DEPRECATED c.int ---
-	// scp_push_file(ssh_scp scp, cstring filename, c.size_t size, c.int perms) -> SSH_DEPRECATED c.int ---
-	// scp_push_file64(ssh_scp scp, cstring filename, uint64_t size, c.int perms) -> SSH_DEPRECATED c.int ---
-	// scp_read(ssh_scp scp, void ^buffer, c.size_t size) -> SSH_DEPRECATED c.int ---
-	// 	^scp_request_get_filename(ssh_scp scp) -> SSH_DEPRECATED const char ---
-	// scp_request_get_permissions(ssh_scp scp) -> SSH_DEPRECATED c.int ---
-	// scp_request_get_size(ssh_scp scp) -> SSH_DEPRECATED c.size_t ---
-	// scp_request_get_size64(ssh_scp scp) -> SSH_DEPRECATED uint64_t ---
-	// 	^scp_request_get_warning(ssh_scp scp) -> SSH_DEPRECATED const char ---
-	// scp_write(ssh_scp scp, const void ^buffer, c.size_t len) -> SSH_DEPRECATED c.int ---
+	get_pubkey_hash :: proc (session: Session, hash: ^[^]u8) -> c.int ---
+
+    @(deprecated="DEPRECATED")
+	forward_accept :: proc (session: Session, timeout_ms: c.int) -> Channel ---
+
+    @(deprecated="DEPRECATED")
+	forward_cancel :: proc (session: Session, address: cstring, port: c.int) -> c.int ---
+
+    @(deprecated="DEPRECATED")
+	forward_listen :: proc (session: Session, address: cstring, port: c.int, bound_port: ^c.int) -> c.int ---
+
+    @(deprecated="Use ssh_get_server_publickey()")
+	get_publickey :: proc (session: Session, key: ^Key) -> c.int ---
+
+    @(deprecated="Please use ssh_session_update_known_hosts()")
+	write_knownhost :: proc (session: Session) -> c.int ---
+
+    @(deprecated="Please use ssh_session_export_known_hosts_entry()")
+	dump_knownhost :: proc (session: Session) -> [^]u8 ---
+
+    @(deprecated="Please use ssh_session_is_known_server()")
+	is_server_known :: proc (session: Session) -> c.int ---
+
+    @(deprecated="Please use ssh_print_hash() instead")
+	print_hexa :: proc (descr: cstring, what: cstring, len: c.size_t) ---
+
+    // NOTE: has the SSH_DEPRECATED attribute but the docstrings dont mention that its deprecated
+    @(deprecated="deprecated")
+	channel_select :: proc (readchans: ^Channel, writechans: ^Channel, exceptchans: ^Channel, timeout: ^timeval) -> c.int ---
+
+    @(deprecated="Please use SFTP instead")
+    scp_accept_request :: proc (scp: Scp) -> c.int ---
+
+    @(deprecated="Please use SFTP instead")
+	scp_close :: proc (scp: Scp) -> c.int ---
+
+    @(deprecated="Please use SFTP instead")
+	scp_deny_request :: proc (scp: Scp, reason: cstring) -> c.int ---
+
+    @(deprecated="Please use SFTP instead")
+	scp_free :: proc (scp: Scp) ---
+
+    @(deprecated="Please use SFTP instead")
+	scp_init :: proc (scp: Scp) -> c.int ---
+
+    @(deprecated="Please use SFTP instead")
+	scp_leave_directory :: proc (scp: Scp) -> c.int ---
+
+    @(deprecated="Please use SFTP instead")
+	scp_new :: proc (session: Session, mode: c.int, location: cstring) -> Scp ---
+
+    @(deprecated="Please use SFTP instead")
+	scp_pull_request :: proc (scp: Scp) -> c.int ---
+
+    @(deprecated="Please use SFTP instead")
+	scp_push_directory :: proc (scp: Scp, dirname: cstring, mode: c.int) -> c.int ---
+
+    @(deprecated="Please use SFTP instead")
+	scp_push_file :: proc (scp: Scp, filename: cstring, size: c.size_t, perms: c.int) -> c.int ---
+
+    @(deprecated="Please use SFTP instead")
+	scp_push_file64 :: proc (scp: Scp, filename: cstring, size: c.uint64_t, perms: c.int) -> c.int ---
+
+    @(deprecated="Please use SFTP instead")
+	scp_read :: proc (scp: Scp, buffer: rawptr, size: c.size_t) -> c.int ---
+
+    @(deprecated="Please use SFTP instead")
+	scp_request_get_filename :: proc (scp: Scp) -> cstring ---
+
+    @(deprecated="Please use SFTP instead")
+	scp_request_get_permissions :: proc (scp: Scp) -> c.int ---
+
+    @(deprecated="Please use SFTP instead")
+	scp_request_get_size :: proc (scp: Scp) -> c.size_t ---
+
+    @(deprecated="Please use SFTP instead")
+	scp_request_get_size64 :: proc (scp: Scp) -> c.uint64_t ---
+
+    @(deprecated="Please use SFTP instead")
+	scp_request_get_warning :: proc (scp: Scp) -> cstring ---
+
+    @(deprecated="Please use SFTP instead")
+	scp_write :: proc (scp: Scp, buffer: rawptr, len: c.size_t) -> c.int ---
+}
+
+
+@(link_prefix="ssh_")
+@(default_calling_convention="c")
+foreign ssh {
 
 	get_random     :: proc(_where: rawptr, _len: c.int , strong: c.int) -> c.int ---
 	get_version    :: proc(session: Session) -> c.int ---
@@ -531,7 +587,6 @@ foreign ssh {
 	message_type                                      :: proc(msg: Message) -> c.int ---
 	mkdir                                             :: proc(pathname: cstring, mode: Mode) -> c.int ---
 
-	// @(link_name="ssh_new")
 	new                  :: proc() -> Session ---
 	options_copy         :: proc(src: Session, dest: ^Session) -> c.int ---
 	options_getopt       :: proc(session: Session, argcptr: ^c.int, argv: ^[^]u8) -> c.int ---
