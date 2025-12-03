@@ -10,6 +10,7 @@ import "core:c"
 import "core:time"
 import "core:sys/posix"
 import "base:runtime"
+import "core:c/libc"
 
 USAGE :: "run FILENAME"
 
@@ -76,7 +77,6 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
 
             if !stdout_done {
                 n = ssh.channel_read(channel, rawptr(&buf), len(buf), false)
-                fmt.println("n=", n)
                 if n <= 0 {
                     stdout_done = true
                 }
@@ -89,7 +89,6 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
 
             if !stderr_done {
                 n = ssh.channel_read(channel, rawptr(&buf), len(buf), true)
-                fmt.println("n=", n)
                 if n <= 0 {
                     stderr_done = true
                 }
@@ -100,8 +99,29 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
                 lua.call(L, 2, 0)
             }
         }
+
+        exit_code: c.uint32_t = ---
+        exit_signal: [^]u8 = ---
+        status := ssh.channel_get_exit_state(channel, &exit_code, &exit_signal, nil)
         ssh.channel_close(channel)
         ssh.channel_free(channel)
+
+        if status != ssh.OK {
+            msg := ssh.get_error(session)
+            lua.pushstring(L, msg)
+            lua.error(L)
+        }
+
+        // save info in self
+        lua.pushinteger(L, lua.Integer(exit_code))
+        lua.setfield(L, 1, "exit_code")
+        fmt.println(exit_signal)
+        lua.pushstring(L, cstring(exit_signal))
+        lua.setfield(L, 1, "exit_signal")
+
+        if exit_signal != nil {
+            libc.free(exit_signal)
+        }
         return 0
     })
     lua.setfield(L, -2, "run")
@@ -128,16 +148,22 @@ define_ssh_session_metatable :: proc(L: ^lua.State) {
     // __index
     lua.newtable(L)
 
-    // cmd()
+    // cmd(args, opts)
     lua.pushcfunction(L, proc "c" (L: ^lua.State) -> c.int {
-        context = runtime.default_context()
+        // [self, args, opts]
         userdata := transmute(^Session) lua.touserdata(L, 1)
         session := userdata^
+        lua.L_checkstring(L, 2) // args is string
 
-        lua.newtable(L) // [cmd]
-        lua.pushvalue(L, 1) // [cmd, session]
-        lua.setfield(L, -2, "session") // [cmd]
+        // TODO: opts
+
+        lua.newtable(L) // [self, args, opts, cmd]
         lua.L_setmetatable(L, METATABLE_SSH_CMD)
+        lua.pushvalue(L, 1) // [self, args, opts, cmd, self]
+        lua.setfield(L, -2, "session") // [self, args, opts, cmd]
+        lua.pushvalue(L, 2) // [self, args, opts, cmd, args]
+
+        lua.setfield(L, -2, "args") // [self, args, opts, cmd]
 
         return 1
     })
@@ -361,6 +387,14 @@ entry_point :: proc() -> int {
     lua.pushcfunction(L, lash_ssh_connect) // [lash, ssh, connect]
     lua.setfield(L, 2, "connect") // [lash, ssh]
     lua.setfield(L, 1, "ssh") // [lash]
+
+    // __get_metatable
+    lua.pushcfunction(L, proc "c" (L: ^lua.State) -> c.int {
+        mt_name := lua.tostring(L, 1)
+        lua.L_getmetatable(L, mt_name)
+        return 1
+    })
+    lua.setfield(L, 1, "_get_metatable") // [lash, ssh]
 
     // evaluate init.lua
     status := lua.L_dofile(L, "src/runtime/init.lua");
