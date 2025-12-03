@@ -1,1 +1,4 @@
 lash
+compile_commands.json
+src/libssh-0.11.3/build/
+tags
