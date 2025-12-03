@@ -59,7 +59,19 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
         args := lua.tostring(L, -1)
         lua.pop(L, 1) // [self]
 
-        channel, err := session_exec_no_read(session, args, false)
+        // self.pty
+        pty: b32 = false
+        lua.getfield(L, 1, "pty") // [self, pty]
+        if !lua.isnil(L, -1) {
+            if lua.isboolean(L, -1) {
+                pty = lua.toboolean(L, -1)
+            } else {
+                lua.L_error(L, "pty: expected boolean, got %s", lua.L_typename(L, -1))
+            }
+        }
+        lua.pop(L, 1)
+
+        channel, err := session_exec_no_read(session, args, pty)
         if err != .None {
             msg := ssh.get_error(session)
             if msg != nil {
@@ -93,7 +105,7 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
         }
 
         stdout_done := lua.isnil(L, stdout_idx)
-        stderr_done := lua.isnil(L, stderr_idx)
+        stderr_done := lua.isnil(L, stderr_idx) || pty // ptys have stderr and stdout merged
         buf: [1024]u8 = ---
         n: c.int
         for !stdout_done || !stderr_done {
@@ -357,7 +369,7 @@ Session_Exec_Error :: enum {
 
 // TODO: ssh_channel_request_pty
 // must close and free channel
-session_exec_no_read :: proc "contextless" (session: ssh.Session, cmd: cstring, pty: bool) -> (ssh.Channel, Session_Exec_Error) {
+session_exec_no_read :: proc "contextless" (session: ssh.Session, cmd: cstring, want_pty: b32) -> (ssh.Channel, Session_Exec_Error) {
     channel := ssh.channel_new(session)
     if channel == nil {
         return nil, .Cant_Create_Channel
@@ -365,6 +377,13 @@ session_exec_no_read :: proc "contextless" (session: ssh.Session, cmd: cstring, 
     rc := ssh.channel_open_session(channel)
     if rc != ssh.OK {
         return nil, .Cant_Open_Session
+    }
+
+    if want_pty {
+        rc = ssh.channel_request_pty(channel)
+        if rc != ssh.OK {
+            return nil, .Cant_Request_Pty
+        }
     }
 
     rc = ssh.channel_request_exec(channel, cmd)
