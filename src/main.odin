@@ -160,7 +160,7 @@ define_ssh_session_metatable :: proc(L: ^lua.State) {
     // __index
     lua.newtable(L)
 
-    // cmd(args, opts)
+    // run(args, opts)
     lua.pushcfunction(L, proc "c" (L: ^lua.State) -> c.int {
         // [self, args, opts]
         userdata := transmute(^Session) lua.touserdata(L, 1)
@@ -179,7 +179,7 @@ define_ssh_session_metatable :: proc(L: ^lua.State) {
 
         return 1
     })
-    lua.setfield(L, -2, "cmd")
+    lua.setfield(L, -2, "sh")
 
     lua.setfield(L, -2, "__index")
 
