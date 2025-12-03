@@ -20,3 +20,15 @@ function SshCmd:output()
     local exit_state = self:run()
     return self.stdout:tostring(), exit_state
 end
+
+--- @return (string, lash.ssh.ExitState)
+function SshCmd:combined_output()
+    assert(self.stdout == nil, "Cannot redirect stdout when it's being captured")
+    assert(self.stderr == nil, "Cannot redirect stderr when it's being captured")
+    local buf = buffer.new()
+    self.stdout = buf
+    self.stderr = buf
+
+    local exit_state = self:run()
+    return self.stdout:tostring(), exit_state
+end
