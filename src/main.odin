@@ -49,24 +49,47 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
     lua.pushcfunction(L, proc "c" (L: ^lua.State) -> c.int {
         context = runtime.default_context()
         lua.L_checktype(L, 1, .TABLE) // [self]
-        lua.getfield(L, 1, "stdout") // [self, stdout]
-        lua.getfield(L, 1, "stderr") // [self, stdout, stderr]
-
-        stdout_idx: lua.Index = 2
-        stderr_idx: lua.Index = 3
-
-        lua.getfield(L, 1, "session") // [self, stderr, stdout, session]
+        lua.getfield(L, 1, "session") // [self, session]
         userdata := transmute(^Session) lua.touserdata(L, -1)
         session := userdata^
-        lua.pop(L, 1) // [self, stdout, stderr]
+        lua.pop(L, 1) // [self]
 
         // self.args
-        lua.getfield(L, 1, "args") // [self, stdout, stderr, args]
-        args := lua.tostring(L, -1) // args is string
+        lua.getfield(L, 1, "args") // [self, args]
+        args := lua.tostring(L, -1)
+        lua.pop(L, 1) // [self]
 
-        channel, err := session_exec_no_read(session, args)
+        channel, err := session_exec_no_read(session, args, false)
         if err != .None {
-            lua_error_from_enum(L, err)
+            msg := ssh.get_error(session)
+            if msg == nil {
+                lua.pushstring(L, msg)
+                lua.error(L)
+            } else {
+                lua_error_from_enum(L, err)
+            }
+        }
+
+        // [self, stdout, stderr, stdin]
+        lua.getfield(L, 1, "stdout")
+        lua.getfield(L, 1, "stderr")
+        lua.getfield(L, 1, "stdin")
+        stdout_idx: lua.Index = 2
+        stderr_idx: lua.Index = 3
+        stdin_idx: lua.Index = 4
+
+        // write stdin, if any
+        if !lua.isnil(L, stdin_idx) {
+            // TODO: support string.buffer and lua files
+            stdin_str := lua.tostring(L, stdin_idx) // only strings supported right now
+            n := ssh.channel_write(channel, rawptr(stdin_str), u32(len(stdin_str)))
+            if n == ssh.ERROR {
+                lua.L_error(L, "%s", ssh.get_error(session))
+            }
+            status := ssh.channel_send_eof(channel)
+            if status != ssh.OK {
+                lua.L_error(L, "%s", ssh.get_error(session))
+            }
         }
 
         stdout_done := lua.isnil(L, stdout_idx)
@@ -323,16 +346,18 @@ make_session :: proc (host: cstring, user: cstring, port: c.int, password: cstri
     return session, nil
 }
 
-// TODO: see if you can get proper messages
-Session_Exec_General_Error :: enum {
+// ssh.get_error(session) *sometimes* gives messages
+Session_Exec_Error :: enum {
     None,
-    Cant_Create_Channel,
-    Cant_Open_Session,
-    Cant_Request_Exec,
+    Cant_Create_Channel, // no message, but noticed it happens when you're not authenticated
+    Cant_Open_Session, // has messages
+    Cant_Request_Exec, // has messages
+    Cant_Request_Pty, // has messages
 }
 
+// TODO: ssh_channel_request_pty
 // must close and free channel
-session_exec_no_read :: proc "contextless" (session: ssh.Session, cmd: cstring) -> (ssh.Channel, Session_Exec_General_Error) {
+session_exec_no_read :: proc "contextless" (session: ssh.Session, cmd: cstring, pty: bool) -> (ssh.Channel, Session_Exec_Error) {
     channel := ssh.channel_new(session)
     if channel == nil {
         return nil, .Cant_Create_Channel
