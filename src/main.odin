@@ -119,6 +119,14 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
         lua.pushstring(L, cstring(exit_signal))
         lua.setfield(L, -2, "exit_signal")
 
+        did_save_stderr := !lua.isnil(L, stderr_idx)
+        if did_save_stderr {
+            lua.getfield(L, stderr_idx, "tostring")
+            lua.pushvalue(L, stderr_idx)
+            lua.call(L, 1, 1)
+            lua.setfield(L, -2, "stderr")
+        }
+
         // save reference to exit_state in self
         lua.pushvalue(L, -2)
         lua.setfield(L, 1, "exit_state")
