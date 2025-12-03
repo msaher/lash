@@ -41,3 +41,5 @@ function lash.list_slice(list, start, finish)
   end
   return new_list
 end
+
+require("ssh")
