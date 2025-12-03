@@ -43,7 +43,7 @@ M.SIGSYS    = 'sigsys'
 
 
 --- @class lash.proc.CmdOpts
---- @field args string
+--- @field args string[]
 --- @field cwd? string
 --- @field env? string[]
 --- @field stdout? uv.uv_stream_t
