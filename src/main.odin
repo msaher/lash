@@ -112,17 +112,21 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
             lua.error(L)
         }
 
-        // save info in self
+        // exit_state (to be returned)
+        lua.newtable(L)
         lua.pushinteger(L, lua.Integer(exit_code))
-        lua.setfield(L, 1, "exit_code")
-        fmt.println(exit_signal)
+        lua.setfield(L, -2, "exit_code")
         lua.pushstring(L, cstring(exit_signal))
-        lua.setfield(L, 1, "exit_signal")
+        lua.setfield(L, -2, "exit_signal")
+
+        // save reference to exit_state in self
+        lua.pushvalue(L, -2)
+        lua.setfield(L, 1, "exit_state")
 
         if exit_signal != nil {
             libc.free(exit_signal)
         }
-        return 0
+        return 1
     })
     lua.setfield(L, -2, "run")
 
@@ -220,7 +224,6 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
     lua.pop(L, 1)
 
     context = runtime.default_context()
-    // fmt.println("host =", host, "user =", user, "port =", port, "passowrd =", password)
     session, err := make_session(host, user, port, password)
 
     msg: cstring = ""
@@ -251,7 +254,6 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
     userdata_session^ = session
     lua.L_setmetatable(L, METATABLE_SESSION) // lua 5.2 or luajit
 
-    // fmt.println("success: session=", session)
     return 1
 }
 
