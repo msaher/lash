@@ -512,6 +512,7 @@ entry_point :: proc() -> int {
         if !want_echo {
             term.c_lflag += { .ECHO }
             posix.tcsetattr(stdin_fd, .TCSANOW, &term)
+            fmt.println()
         }
 
         return 1
