@@ -248,10 +248,20 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
     // table.password
     lua.getfield(L, 1, "password")
     idx = lua.gettop(L)
-    if !lua.isstring(L, idx) {
-        lua.L_error(L, "password: expected string, got %s", lua.L_typename(L, idx))
+    if !lua.isstring(L, idx) && !lua.isfunction(L, idx) {
+        lua.L_error(L, "password: expected string or function, got %s", lua.L_typename(L, idx))
     }
-    password := lua.tostring(L, idx)
+    password: cstring = nil
+    if lua.isstring(L, idx) {
+        password = lua.tostring(L, idx)
+    } else {
+        // TODO: what if callback errors?
+        lua.call(L, 0, 1)
+        if !lua.isstring(L, idx) {
+            lua.L_error(L, "password callback: expected to return string, returned %s", lua.L_typename(L, idx))
+        }
+        password = lua.tostring(L, -1)
+    }
     lua.pop(L, 1)
 
     context = runtime.default_context()
