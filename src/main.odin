@@ -25,19 +25,6 @@ lua_error_from_enum :: proc "contextless" (L: ^lua.State, err: any) {
     lua.error(L)
 }
 
-// TODO: handle cases
-is_host_known_and_ok :: proc(session: ssh.Session) -> (bool, cstring) {
-    state := ssh.session_is_known_server(session);
-    #partial switch state {
-    case .OK:
-        return true, ""
-    case .ERROR:
-        return false, ssh.get_error(session)
-    case:
-        return false, ""
-    }
-}
-
 define_ssh_cmd_metatable :: proc(L: ^lua.State) {
     lua.L_newmetatable(L, METATABLE_SSH_CMD)
 
@@ -269,27 +256,24 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
     context = runtime.default_context()
     session, err := make_session(host, user, port, password)
 
-    msg: cstring = ""
-    switch e in err {
-    case Cant_Connect_Error:
-        msg = e.msg
-    case Bad_Host_Error:
-        if e.msg == "" {
-            msg = "Bad host error: Unknown reason"
-        } else {
-            msg = e.msg
-        }
-    case Connection_Session_General_Error:
-        msg = Connection_Session_Messages[e]
-    }
-
-    if err != nil {
-        // msg lifetime is same as session
-        lua.pushfstring(L, msg) // copy to lua
+    if err != .None  {
         if session != nil {
+            msg := ssh.get_error(session)
+            if msg != nil {
+                lua.pushstring(L, msg)
+                ssh.free(session)
+                lua.error(L)
+            }
             ssh.free(session)
         }
-        lua.error(L)
+
+        msg := MAKE_SESSION_ERROR_MESSAGES[err]
+        if msg != "" {
+            lua.pushstring(L, msg)
+            lua.error(L)
+        } else {
+            lua.L_error(L, "An unkown error occured while creating the session")
+        }
     }
 
     userdata := lua.newuserdata(L, size_of(Session))
@@ -300,34 +284,38 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
     return 1
 }
 
-Cant_Connect_Error :: struct {msg: cstring}
-Bad_Host_Error :: struct {msg: cstring}
-
-// connected, authenticated session
+// a connected, authenticated ssh.Session
 Session :: ssh.Session
 
-Connection_Session_General_Error :: enum {
-    Denied = int(ssh.Auth.DENIED),
-    Partial = int(ssh.Auth.PARTIAL),
-    Error = int(ssh.Auth.ERROR),
-    Cant_Make_Session,
+Make_Session_Error :: enum {
+    None,
+    Auth_Denied = int(ssh.Auth.DENIED),   // has messages
+    Auth_Partial = int(ssh.Auth.PARTIAL), // no message (I think)
+    Cant_Connect,                         // has messages
+    Cant_Check_Host,                      // has messages
+    Host_Changed_Key,                     // no message. possible attack
+    Cant_Make_Session,                    // no message since no session
+    Host_Other_Key,                       // no message. possible attack.
+    No_Known_Hosts_File,                  // no message. what? why dont you have the file???
+    Unknown_Host,                         // no message. you have to trust it somehwere else
+    Auth_Error = int(ssh.Auth.ERROR),     // has messages
 }
 
-@(rodata)
-Connection_Session_Messages := [Connection_Session_General_Error]cstring {
-    .Error = "A serious error happened",
-    .Denied = "Authentication failed",
-    .Partial = "You've been partially authenticated, you still have to use another method",
+// @(rodata)
+MAKE_SESSION_ERROR_MESSAGES := #partial [Make_Session_Error]cstring {
+    .Auth_Denied = "Authentication failed",
+    .Auth_Partial = "You've been partially authenticated, you still have to use another method",
     .Cant_Make_Session = "Can't create ssh session",
+    .Host_Changed_Key = "POSSIBLE ATTACK: Host key for server changed",
+    .Host_Other_Key = "POSSIBLE ATTACK: The host key for this server was not found but an other type of key exists",
+    .No_Known_Hosts_File = "Could not find known host file",
+    .Unknown_Host = "The host is unknown",
+    .Auth_Error = "A serious error happened",
 }
 
-Connected_Session_Error :: union {
-    Connection_Session_General_Error,
-    Cant_Connect_Error,
-    Bad_Host_Error,
-}
-
-make_session :: proc (host: cstring, user: cstring, port: c.int, password: cstring) -> (Session, Connected_Session_Error) {
+// a session may be returned even if err != .None in case ssh.get_error(session) returns something useful.
+// Don't forget to call ssh.free(session) after you copy the message. The error and sessio have the same lifetime.
+make_session :: proc (host: cstring, user: cstring, port: c.int, password: cstring) -> (Session, Make_Session_Error) {
     session := ssh.new()
     if session == nil {
         return nil, .Cant_Make_Session
@@ -340,22 +328,31 @@ make_session :: proc (host: cstring, user: cstring, port: c.int, password: cstri
 
     status := ssh.connect(session)
     if status != ssh.OK {
-        msg := ssh.get_error(session)
-        return nil, Cant_Connect_Error{msg = msg}
+        return session, .Cant_Connect
     }
 
-    is_ok, msg := is_host_known_and_ok(session)
-    if !is_ok {
-        return nil, Bad_Host_Error{msg=msg}
+    state := ssh.session_is_known_server(session);
+    switch state {
+    case .OK:
+    case .ERROR:
+        return session, .Cant_Check_Host
+    case .CHANGED:
+        return session, .Host_Changed_Key
+    case .OTHER:
+        return session, .Host_Other_Key
+    case .NOT_FOUND:
+        return session, .No_Known_Hosts_File
+    case .UNKNOWN:
+        return session, .Unknown_Host
     }
 
     auth_int := ssh.userauth_password(session, user, password)
     auth := ssh.Auth(auth_int)
     if auth != .SUCCESS {
-        ssh.free(session)
-        return nil, Connection_Session_General_Error(auth)
+        ssh.disconnect(session)
+        return session, Make_Session_Error(auth)
     }
-    return session, nil
+    return session, .None
 }
 
 // ssh.get_error(session) *sometimes* gives messages
@@ -367,7 +364,6 @@ Session_Exec_Error :: enum {
     Cant_Request_Pty, // has messages
 }
 
-// TODO: ssh_channel_request_pty
 // must close and free channel
 session_exec_no_read :: proc "contextless" (session: ssh.Session, cmd: cstring, want_pty: b32) -> (ssh.Channel, Session_Exec_Error) {
     channel := ssh.channel_new(session)
