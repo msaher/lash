@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:strings"
 import os "core:os/os2"
+import "core:bufio"
 import lua "luajit"
 import "luv"
 import "ssh"
@@ -444,7 +445,78 @@ entry_point :: proc() -> int {
         lua.L_getmetatable(L, mt_name)
         return 1
     })
-    lua.setfield(L, 1, "_get_metatable") // [lash, ssh]
+    lua.setfield(L, 1, "_get_metatable")
+
+    // @param prompt string?
+    // @param opts? {blind?: boolean}
+    // @return (string?, error)
+    // input()
+    lua.pushcfunction(L, proc "c" (L: ^lua.State) -> c.int {
+        num_args := lua.gettop(L)
+        if num_args < 1 {
+            lua.L_error(L, "Expected at least 1 argument")
+        }
+
+        has_prompt := lua.isstring(L, 1)
+        if !lua.isnil(L, 1) && !has_prompt {
+            lua.L_error(L, "prompt: expected string, got %s", lua.L_typename(L, 1))
+        }
+
+        context = runtime.default_context()
+        if has_prompt {
+            prompt := lua.tostring(L, 1)
+            fmt.print(prompt)
+        }
+
+        want_echo: b32 = true
+        // opts
+        if num_args > 1 && !lua.isnil(L, 2) {
+            lua.getfield(L, 2, "echo")
+            if !lua.isnil(L, -1) {
+                if !lua.isboolean(L, -1) {
+                    lua.L_error(L, "echo: expected boolean, got %s", lua.L_typename(L, -1))
+                }
+                want_echo = lua.toboolean(L, -1)
+            }
+            lua.pop(L, 1)
+        }
+
+        stdin_fd := posix.FD(os.fd(os.stdin))
+
+        // TODO: support for windows
+        term: posix.termios
+        if !want_echo {
+            // do we handle errors? if not tty
+            posix.tcgetattr(stdin_fd, &term)
+            term.c_lflag -= { .ECHO }
+            posix.tcsetattr(stdin_fd, .TCSANOW, &term)
+        }
+
+        stdin_reader := os.to_reader(os.stdin)
+        stdin_scanner: bufio.Scanner
+        bufio.scanner_init(&stdin_scanner, stdin_reader, context.temp_allocator)
+
+        if !bufio.scan(&stdin_scanner) {
+            // TODO: if not tty you get EOF so error is nil
+            err := bufio.scanner_error(&stdin_scanner)
+            msg := fmt.caprint(err)
+            lua.pushstring(L, msg)
+            free_all(context.temp_allocator)
+            lua.error(L)
+        }
+
+        line := bufio.scanner_text(&stdin_scanner)
+        lua.pushlstring(L, strings.unsafe_string_to_cstring(line), len(line))
+
+        // turn back echo after we turn it off
+        if !want_echo {
+            term.c_lflag += { .ECHO }
+            posix.tcsetattr(stdin_fd, .TCSANOW, &term)
+        }
+
+        return 1
+    })
+    lua.setfield(L, 1, "input")
 
     // evaluate init.lua
     status := lua.L_dofile(L, "src/runtime/init.lua");
