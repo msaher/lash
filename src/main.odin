@@ -285,7 +285,7 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
     if err != .None  {
         if session != nil {
             msg := ssh.get_error(session)
-            if msg != nil {
+            if msg != "" {
                 lua.pushstring(L, msg)
                 ssh.free(session)
                 lua.error(L)
