@@ -26,6 +26,28 @@ lua_error_from_enum :: proc "contextless" (L: ^lua.State, err: any) {
     lua.error(L)
 }
 
+// [target, table, field]
+lua_check_and_set :: proc "contextless" (L: ^lua.State, name: cstring, allowed_types: bit_set[lua.Type], msg: cstring, metatable: cstring = "") {
+    lua.getfield(L, -1, name)
+    type := lua.type(L, -1)
+    if .NIL in allowed_types && type == .NIL {
+        lua.pop(L, 1)
+        return
+    }
+    if type not_in allowed_types {
+        type_name := lua.L_typename(L, -1)
+        lua.L_error(L, "%s: %s, got %s", name, msg, type_name)
+    }
+    if type == .USERDATA {
+        if lua.L_testudata(L, -1, metatable) == nil {
+            type_name := lua.L_typename(L, -1)
+            lua.L_error(L, "%s: %s, got %s", name, msg, type_name)
+        }
+        lua.pop(L, 1)
+    }
+    lua.setfield(L, -3, name)
+}
+
 define_ssh_cmd_metatable :: proc(L: ^lua.State) {
     lua.L_newmetatable(L, METATABLE_SSH_CMD)
 
@@ -106,6 +128,8 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
                 lua.L_error(L, "%s", ssh.get_error(session))
             }
         }
+
+        // TODO: check stdout and stderr
 
         stdout_done := lua.isnil(L, stdout_idx)
         stderr_done := lua.isnil(L, stderr_idx) || pty // ptys have stderr and stdout merged
@@ -198,23 +222,39 @@ define_ssh_session_metatable :: proc(L: ^lua.State) {
     // __index
     lua.newtable(L)
 
-    // run(args, opts)
+    // sh(args, opts)
     lua.pushcfunction(L, proc "c" (L: ^lua.State) -> c.int {
+        // @param args string
+        // @param opts? table
         // [self, args, opts]
+        num_args := lua.gettop(L)
+
+        lua.L_checkudata(L, 1, METATABLE_SESSION)
         userdata := transmute(^Session) lua.touserdata(L, 1)
         session := userdata^
         lua.L_checkstring(L, 2) // args is string
 
-        // TODO: opts
-
+        // cmd
         lua.newtable(L) // [self, args, opts, cmd]
         lua.L_setmetatable(L, METATABLE_SSH_CMD)
+
+        // cmd.session
         lua.pushvalue(L, 1) // [self, args, opts, cmd, self]
         lua.setfield(L, -2, "session") // [self, args, opts, cmd]
-        lua.pushvalue(L, 2) // [self, args, opts, cmd, args]
 
+        // cmd.args
+        lua.pushvalue(L, 2) // [self, args, opts, cmd, args]
         lua.setfield(L, -2, "args") // [self, args, opts, cmd]
 
+        // cmd.opts
+        if num_args >= 3 {
+            lua.pushvalue(L, 3) // [self, args, opts, cmd, opts]
+            lua_check_and_set(L, "pty", {.NIL, .BOOLEAN}, "expected boolean")
+            lua_check_and_set(L, "stdin", {.NIL, .STRING, .FUNCTION}, "expected boolean or callback")
+            lua_check_and_set(L, "stdout", {.NIL, .USERDATA}, "expected buffer", metatable="buffer")
+            lua_check_and_set(L, "stderr", {.NIL, .USERDATA}, "expected buffer", metatable="buffer")
+            lua.pop(L, 1)
+        }
         return 1
     })
     lua.setfield(L, -2, "sh")
