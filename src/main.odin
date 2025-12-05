@@ -79,9 +79,24 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
         stdin_idx: lua.Index = 4
 
         // write stdin, if any
+        // TODO: support string.buffer and lua files
         if !lua.isnil(L, stdin_idx) {
-            // TODO: support string.buffer and lua files
-            stdin_str := lua.tostring(L, stdin_idx) // only strings supported right now
+            if !lua.isstring(L, stdin_idx) && !lua.isfunction(L, stdin_idx) {
+                lua.L_error(L, "stdin: expected string or function, got %s", lua.L_typename(L, stdin_idx))
+            }
+
+            stdin_str: cstring = nil
+            if lua.isstring(L, stdin_idx) {
+                stdin_str = lua.tostring(L, stdin_idx)
+            } else {
+                // TODO: maybe this should be an iterator that I call repeatedly in a loop?
+                lua.call(L, 0, 1)
+                if !lua.isstring(L, stdin_idx) {
+                    lua.L_error(L, "stdin callback: expected to return string, returned %s", lua.L_typename(L, stdin_idx))
+                }
+                stdin_str = lua.tostring(L, stdin_idx)
+            }
+            // stdin_str := lua.tostring(L, stdin_idx) // only strings supported right now
             n := ssh.channel_write(channel, rawptr(stdin_str), u32(len(stdin_str)))
             if n == ssh.ERROR {
                 lua.L_error(L, "%s", ssh.get_error(session))
