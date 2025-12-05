@@ -310,13 +310,18 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
             lua.L_error(L, "privatekey: expected string, got %s", lua.L_typename(L, -1))
         }
         privatekey := lua.tostring(L, -1)
-        lua.pop(L, 1)
 
         auth = Auth_Publickey_File {
             public_path = publickey,
             private_path = privatekey,
             passphrase = passphrase,
         }
+        lua.pop(L, 1)
+
+
+    case "agent":
+        auth = Auth_Agent{}
+        lua.pop(L, 1)
 
     case:
         lua.L_error(L, "TODO!")
@@ -415,10 +420,13 @@ Auth_Publickey_File :: struct {
     passphrase: cstring, // can be nil btw
 }
 
+Auth_Agent :: struct { }
+
 Auth_Method :: union {
     Auth_Password,
     Auth_Publickey_Auto,
     Auth_Publickey_File,
+    Auth_Agent,
 }
 
 // a session may be returned even if err != .None in case ssh.get_error(session) returns something useful.
@@ -471,6 +479,10 @@ make_session :: proc "contextless" (host: cstring, user: cstring, port: c.int, a
 
     case Auth_Publickey_Auto:
         auth_status = ssh.userauth_publickey_auto(session, nil, auth.passphrase)
+        err = Make_Session_Error(ssh.Auth(auth_status))
+
+    case Auth_Agent:
+        auth_status = ssh.userauth_agent(session, nil)
         err = Make_Session_Error(ssh.Auth(auth_status))
 
     case Auth_Publickey_File:
