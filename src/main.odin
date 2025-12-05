@@ -280,6 +280,7 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
         }
         auth = Auth_Password { lua.tostring(L, -1) }
         lua.pop(L, 1)
+
     case "publickey":
         lua.getfield(L, -1, "passphrase")
         if !lua.isnil(L, -1) && !lua.isstring(L, -1) {
@@ -287,6 +288,36 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
         }
         auth = Auth_Publickey_Auto { lua.tostring(L, -1) }
         lua.pop(L, 1)
+
+    // TODO: expand homedir ~
+    case "publickey_file":
+        lua.getfield(L, -1, "passphrase")
+        if !lua.isnil(L, -1) && !lua.isstring(L, -1) {
+            lua.L_error(L, "passphrase: expected string, got %s", lua.L_typename(L, -1))
+        }
+        passphrase := lua.tostring(L, -1)
+        lua.pop(L, 1)
+
+        lua.getfield(L, -1, "publickey")
+        if !lua.isstring(L, -1) {
+            lua.L_error(L, "publickey: expected string, got %s", lua.L_typename(L, -1))
+        }
+        publickey := lua.tostring(L, -1)
+        lua.pop(L, 1)
+
+        lua.getfield(L, -1, "privatekey")
+        if !lua.isstring(L, -1) {
+            lua.L_error(L, "privatekey: expected string, got %s", lua.L_typename(L, -1))
+        }
+        privatekey := lua.tostring(L, -1)
+        lua.pop(L, 1)
+
+        auth = Auth_Publickey_File {
+            public_path = publickey,
+            private_path = privatekey,
+            passphrase = passphrase,
+        }
+
     case:
         lua.L_error(L, "TODO!")
     }
@@ -301,6 +332,21 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
                 lua.error(L)
             }
             ssh.free(session)
+        }
+
+        // handle EOF errors
+        if auth_with_files, ok := auth.(Auth_Publickey_File); ok {
+            #partial switch err {
+            // TODO: distinguish between permissions and existence for EOF_*
+            case .EOF_Publickey:
+                lua.L_error(L, "can't read publickey: %s", auth_with_files.public_path)
+            case .EOF_Privatekey:
+                lua.L_error(L, "can't read privatekey: %s", auth_with_files.private_path)
+            case .Cant_Import_Privatekey:
+                lua.L_error(L, "error occursed while reading private key: %s", auth_with_files.private_path)
+            case .Cant_Import_Publickey:
+                lua.L_error(L, "error occursed while reading public key: %s", auth_with_files.private_path)
+            }
         }
 
         msg := MAKE_SESSION_ERROR_MESSAGES[err]
@@ -335,6 +381,10 @@ Make_Session_Error :: enum {
     Host_Other_Key,                       // no message. possible attack.
     No_Known_Hosts_File,                  // no message. what? why dont you have the file???
     Unknown_Host,                         // no message. you have to trust it somehwere else
+    EOF_Publickey,                        // no messages. casued by unreadable key file
+    EOF_Privatekey,                       // no messages. casued by unreadable key file
+    Cant_Import_Publickey,                // no messages. Only logged
+    Cant_Import_Privatekey,               // no messages. Only logged
     Auth_Error = int(ssh.Auth.ERROR),     // has messages
 }
 
@@ -359,9 +409,16 @@ Auth_Publickey_Auto :: struct {
     passphrase: cstring, // can be nil btw
 }
 
+Auth_Publickey_File :: struct {
+    public_path: cstring,
+    private_path: cstring,
+    passphrase: cstring, // can be nil btw
+}
+
 Auth_Method :: union {
     Auth_Password,
     Auth_Publickey_Auto,
+    Auth_Publickey_File,
 }
 
 // a session may be returned even if err != .None in case ssh.get_error(session) returns something useful.
@@ -404,16 +461,54 @@ make_session :: proc "contextless" (host: cstring, user: cstring, port: c.int, a
         return session, .Unknown_Host
     }
 
+    // should we make auth a seperate function?
     err: Make_Session_Error
     auth_status: c.int
     switch auth in auth_method {
     case Auth_Password:
         auth_status = ssh.userauth_password(session, user, auth.password)
+        err = Make_Session_Error(ssh.Auth(auth_status))
+
     case Auth_Publickey_Auto:
         auth_status = ssh.userauth_publickey_auto(session, nil, auth.passphrase)
+        err = Make_Session_Error(ssh.Auth(auth_status))
+
+    case Auth_Publickey_File:
+        // grab public key
+        pub_key: ssh.Key
+        status = ssh.pki_import_pubkey_file(auth.public_path, &pub_key)
+        if status == ssh.EOF {
+            err = .EOF_Publickey
+            break;
+        } else if status != ssh.OK {
+            err = .Cant_Import_Publickey
+            break
+        }
+        defer ssh.key_free(pub_key)
+
+        // check server accepts public key
+        auth_status = ssh.userauth_try_publickey(session, nil, pub_key)
+        err = Make_Session_Error(ssh.Auth(auth_status))
+        if err != .None {
+            break;
+        }
+
+        // grab private key
+        priv_key: ssh.Key
+        status := ssh.pki_import_privkey_file(auth.private_path, auth.passphrase, nil, nil, &priv_key)
+        if status == ssh.EOF {
+            err = .EOF_Privatekey
+            break
+        } else if status != ssh.OK {
+            err = .Cant_Import_Privatekey
+            break
+        }
+        defer ssh.key_free(priv_key)
+
+        auth_status = ssh.userauth_publickey(session, nil, priv_key)
+        err = Make_Session_Error(ssh.Auth(auth_status))
     }
 
-    err = Make_Session_Error(ssh.Auth(auth_status))
     if err != .None {
         ssh.disconnect(session)
     }
