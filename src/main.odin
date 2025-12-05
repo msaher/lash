@@ -259,29 +259,39 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
     }
     lua.pop(L, 1)
 
-    // TODO: support other auth methods
-    // table.password
-    lua.getfield(L, 1, "password")
-    idx = lua.gettop(L)
-    if !lua.isstring(L, idx) && !lua.isfunction(L, idx) {
-        lua.L_error(L, "password: expected string or function, got %s", lua.L_typename(L, idx))
+    // table.auth
+    lua.getfield(L, 1, "auth")
+    lua.L_checktype(L, -1, .TABLE)
+
+    // type(auth.type) == "string"
+    lua.getfield(L, -1, "type")
+    if !lua.isstring(L, -1) {
+        lua.L_error(L, "Invalid auth method")
     }
-    password: cstring = nil
-    if lua.isstring(L, idx) {
-        password = lua.tostring(L, idx)
-    } else {
-        // TODO: what if callback errors?
-        lua.call(L, 0, 1)
-        if !lua.isstring(L, idx) {
-            lua.L_error(L, "password callback: expected to return string, returned %s", lua.L_typename(L, idx))
-        }
-        password = lua.tostring(L, -1)
-    }
+    auth_type := lua.tostring(L, -1)
     lua.pop(L, 1)
 
-    context = runtime.default_context()
-    session, err := make_session(host, user, port, password)
+    auth: Auth_Method
+    switch auth_type {
+    case "password":
+        lua.getfield(L, -1, "password")
+        if !lua.isstring(L, -1) {
+            lua.L_error(L, "password: expected string, got %s", lua.L_typename(L, -1))
+        }
+        auth = Auth_Password { lua.tostring(L, -1) }
+        lua.pop(L, 1)
+    case "publickey":
+        lua.getfield(L, -1, "passphrase")
+        if !lua.isnil(L, -1) && !lua.isstring(L, -1) {
+            lua.L_error(L, "passphrase: expected string, got %s", lua.L_typename(L, -1))
+        }
+        auth = Auth_Publickey_Auto { lua.tostring(L, -1) }
+        lua.pop(L, 1)
+    case:
+        lua.L_error(L, "TODO!")
+    }
 
+    session, err := make_session(host, user, port, auth)
     if err != .None  {
         if session != nil {
             msg := ssh.get_error(session)
@@ -313,8 +323,9 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
 // a connected, authenticated ssh.Session
 Session :: ssh.Session
 
+// TODO: add AUTH_AGAIN
 Make_Session_Error :: enum {
-    None,
+    None = int(ssh.Auth.SUCCESS),
     Auth_Denied = int(ssh.Auth.DENIED),   // has messages
     Auth_Partial = int(ssh.Auth.PARTIAL), // no message (I think)
     Cant_Connect,                         // has messages
@@ -339,16 +350,37 @@ MAKE_SESSION_ERROR_MESSAGES := #partial [Make_Session_Error]cstring {
     .Auth_Error = "A serious error happened",
 }
 
+Auth_Password :: struct {
+    password: cstring
+}
+
+// TODO: what if we allow choosing a specific key?
+Auth_Publickey_Auto :: struct {
+    passphrase: cstring, // can be nil btw
+}
+
+Auth_Method :: union {
+    Auth_Password,
+    Auth_Publickey_Auto,
+}
+
 // a session may be returned even if err != .None in case ssh.get_error(session) returns something useful.
 // Don't forget to call ssh.free(session) after you copy the message. The error and sessio have the same lifetime.
-make_session :: proc (host: cstring, user: cstring, port: c.int, password: cstring) -> (Session, Make_Session_Error) {
+make_session :: proc "contextless" (host: cstring, user: cstring, port: c.int, auth_method: Auth_Method) -> (Session, Make_Session_Error) {
     session := ssh.new()
     if session == nil {
         return nil, .Cant_Make_Session
     }
-    // verbosity := ssh.LOG_PROTOCOL
+    // verbosity := 4
     // ssh.options_set(session, .LOG_VERBOSITY, &verbosity)
     ssh.options_set(session, .HOST, rawptr(host))
+    // If you dont pass user then it defaults to current user
+    // However, things like ssh.userauth_publickey_auto()
+    // break with a cryptic parsing error when then user is nil
+    // Its so lame I spent like an hour debugging this
+    // I'm NOT removing this comment as a constant reminder of agony
+    // (perhaps should've compiled with -vet-unused-varaibles)
+    ssh.options_set(session, .USER, rawptr(user))
     port := port
     ssh.options_set(session, .PORT, &port)
 
@@ -372,13 +404,21 @@ make_session :: proc (host: cstring, user: cstring, port: c.int, password: cstri
         return session, .Unknown_Host
     }
 
-    auth_int := ssh.userauth_password(session, user, password)
-    auth := ssh.Auth(auth_int)
-    if auth != .SUCCESS {
-        ssh.disconnect(session)
-        return session, Make_Session_Error(auth)
+    err: Make_Session_Error
+    auth_status: c.int
+    switch auth in auth_method {
+    case Auth_Password:
+        auth_status = ssh.userauth_password(session, user, auth.password)
+    case Auth_Publickey_Auto:
+        auth_status = ssh.userauth_publickey_auto(session, nil, auth.passphrase)
     }
-    return session, .None
+
+    err = Make_Session_Error(ssh.Auth(auth_status))
+    if err != .None {
+        ssh.disconnect(session)
+    }
+
+    return session, err
 }
 
 // ssh.get_error(session) *sometimes* gives messages
