@@ -685,6 +685,7 @@ entry_point :: proc() -> int {
         }
 
         line := bufio.scanner_text(&stdin_scanner)
+        bufio.scanner_destroy(&stdin_scanner)
         lua.pushlstring(L, strings.unsafe_string_to_cstring(line), len(line))
 
         // turn back echo after we turn it off
