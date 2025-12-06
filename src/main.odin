@@ -63,11 +63,9 @@ lua_check :: proc "contextless" (L: ^lua.State, idx: lua.Index, name: cstring, a
     if .NIL in allowed_types && type == .NIL {
         return .NIL
     }
-    if type not_in allowed_types {
-        type_name := lua.L_typename(L, -1)
-        lua.L_error(L, "%s: %s, got %s", name, msg, type_name)
-    }
-    if type == .USERDATA && !lua_check_userdata(L, metatable) {
+    fail := (type not_in allowed_types) ||
+            (type == .USERDATA && !lua_check_userdata(L, metatable))
+    if fail {
         type_name := lua.L_typename(L, -1)
         lua.L_error(L, "%s: %s, got %s", name, msg, type_name)
     }
@@ -76,21 +74,12 @@ lua_check :: proc "contextless" (L: ^lua.State, idx: lua.Index, name: cstring, a
 
 // [target, table, field]
 lua_check_and_set :: proc "contextless" (L: ^lua.State, name: cstring, allowed_types: bit_set[lua.Type], msg: cstring, metatable: cstring = "") {
-    lua.getfield(L, -1, name)
-    type := lua.type(L, -1)
-    if .NIL in allowed_types && type == .NIL {
+    type := lua_check(L, -1, name, allowed_types, msg, metatable)
+    if type != .NIL {
+        lua.setfield(L, -3, name)
+    } else {
         lua.pop(L, 1)
-        return
     }
-    if type not_in allowed_types {
-        type_name := lua.L_typename(L, -1)
-        lua.L_error(L, "%s: %s, got %s", name, msg, type_name)
-    }
-    if type == .USERDATA && !lua_check_userdata(L, metatable) {
-        type_name := lua.L_typename(L, -1)
-        lua.L_error(L, "%s: %s, got %s", name, msg, type_name)
-    }
-    lua.setfield(L, -3, name)
 }
 
 lua_tostring_pop :: proc "contextless" (L: ^lua.State) -> cstring {
