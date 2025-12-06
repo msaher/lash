@@ -17,10 +17,16 @@ USAGE :: "run FILENAME"
 METATABLE_SESSION :: "SshSession"
 METATABLE_SSH_CMD :: "SshCmd"
 
+lua_push_errmsg :: proc "contextless" (L: ^lua.State, msg: cstring) {
+    lua.L_where(L, 1)
+    lua.pushstring(L, msg)
+    lua.concat(L, 2)
+}
+
 lua_error_from_enum :: proc "contextless" (L: ^lua.State, err: any) {
     context = runtime.default_context()
     msg := fmt.caprint(err)
-    lua.pushstring(L, msg)
+    lua_push_errmsg(L, msg)
     delete(msg)
     lua.error(L)
 }
@@ -128,7 +134,7 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
         channel, err := session_exec_no_read(session, args, pty)
         if err != .None {
             msg := ssh.get_error(session)
-            lua.pushstring(L, msg)
+            lua_push_errmsg(L, msg)
             ssh.free(session)
             if msg != nil {
                 lua.error(L)
@@ -192,7 +198,7 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
 
         if status != ssh.OK {
             msg := ssh.get_error(session)
-            lua.pushstring(L, msg)
+            lua_push_errmsg(L, msg)
             ssh.free(session)
             lua.error(L)
         }
@@ -339,7 +345,7 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
         if session != nil {
             msg := ssh.get_error(session)
             if msg != "" {
-                lua.pushstring(L, msg)
+                lua_push_errmsg(L, msg)
                 ssh.free(session)
                 lua.error(L)
             }
@@ -363,7 +369,7 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
 
         msg := MAKE_SESSION_ERROR_MESSAGES[err]
         if msg != "" {
-            lua.pushstring(L, msg)
+            lua_push_errmsg(L, msg)
             lua.error(L)
         } else {
             lua.L_error(L, "An unkown error occured while creating the session")
@@ -681,8 +687,8 @@ entry_point :: proc() -> int {
                 lua.L_error(L, "EOF when reading a line")
             }
             msg := fmt.caprint(err)
-            lua.pushstring(L, msg)
-            free_all(context.temp_allocator)
+            lua_push_errmsg(L, msg)
+            delete(msg)
             lua.error(L)
         }
 
