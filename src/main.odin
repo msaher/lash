@@ -673,8 +673,11 @@ entry_point :: proc() -> int {
         bufio.scanner_init(&stdin_scanner, stdin_reader, context.temp_allocator)
 
         if !bufio.scan(&stdin_scanner) {
-            // TODO: if not tty you get EOF so error is nil
             err := bufio.scanner_error(&stdin_scanner)
+            bufio.scanner_destroy(&stdin_scanner)
+            if err == nil { // nil means EOF
+                lua.L_error(L, "EOF when reading a line")
+            }
             msg := fmt.caprint(err)
             lua.pushstring(L, msg)
             free_all(context.temp_allocator)
