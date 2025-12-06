@@ -12,9 +12,6 @@ import "core:sys/posix"
 import "base:runtime"
 import "core:c/libc"
 
-// TODO use -vet
-// dont transmute when you can cast smh
-
 USAGE :: "run FILENAME"
 
 METATABLE_SESSION :: "SshSession"
@@ -27,8 +24,6 @@ lua_error_from_enum :: proc "contextless" (L: ^lua.State, err: any) {
     delete(msg)
     lua.error(L)
 }
-
-// lua_check_type :: proc "contextless" (L: ^lua.State, name)
 
 // check luajit's string.buffer
 // lua.testudata is not useful because it seems the string.buffer metatable is not in the registery
@@ -257,9 +252,9 @@ define_ssh_session_metatable :: proc(L: ^lua.State) {
 
         // session
         lua.L_checkudata(L, 1, METATABLE_SESSION)
-        userdata := cast(^Session) lua.touserdata(L, 1)
-        session := userdata^
-        lua.L_checkstring(L, 2) // args is string
+
+        // args
+        lua.L_checkstring(L, 2)
 
         // cmd
         lua.newtable(L) // [self, args, opts, cmd]
@@ -419,7 +414,6 @@ Auth_Password :: struct {
     password: cstring
 }
 
-// TODO: what if we allow choosing a specific key?
 Auth_Publickey_Auto :: struct {
     passphrase: cstring, // can be nil btw
 }
@@ -517,7 +511,7 @@ make_session :: proc "contextless" (host: cstring, user: cstring, port: c.int, a
 
         // grab private key
         priv_key: ssh.Key
-        status := ssh.pki_import_privkey_file(auth.private_path, auth.passphrase, nil, nil, &priv_key)
+        status = ssh.pki_import_privkey_file(auth.private_path, auth.passphrase, nil, nil, &priv_key)
         if status == ssh.EOF {
             err = .EOF_Privatekey
             break
