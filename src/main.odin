@@ -88,6 +88,15 @@ lua_tostring_pop :: proc "contextless" (L: ^lua.State) -> cstring {
     return s
 }
 
+expand_home :: proc (home: string, src: cstring, allocator := context.allocator) -> (cstring, bool) {
+    slice := cast([^]u8)src
+    if slice[0] == '~' {
+        substring := cstring(slice[1:])
+        return fmt.caprintf("%s%s", home, substring), true
+    }
+    return src, false
+}
+
 define_ssh_cmd_metatable :: proc(L: ^lua.State) {
     lua.L_newmetatable(L, METATABLE_SSH_CMD)
 
@@ -315,6 +324,7 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
     lua_check(L, -1, "auth", {.TABLE}, "expected table")
     _, auth_type := lua_check(L, -1, "type", {.STRING}, "Invalid auth type"), lua_tostring_pop(L)
 
+    context = runtime.default_context()
     auth: Auth_Method
     switch auth_type {
     case "password":
@@ -326,16 +336,25 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
     case "agent":
         auth = Auth_Agent{}
         lua.pop(L, 1)
-    // TODO: expand homedir ~
     case "publickey_file":
+        info := Auth_Publickey_File {}
         _, passphrase := lua_check(L, -1, "passphrase", {.STRING, .NIL}, "expected string"), lua_tostring_pop(L)
         _, publickey  := lua_check(L, -1, "publickey", {.STRING}, "expected string"), lua_tostring_pop(L)
         _, privatekey := lua_check(L, -1, "privatekey", {.STRING}, "expected string"), lua_tostring_pop(L)
-        auth = Auth_Publickey_File {
-            public_path = publickey,
-            private_path = privatekey,
-            passphrase = passphrase,
+        info.passphrase = passphrase
+
+        home, has_home := os.lookup_env_alloc("HOME", context.allocator)
+        if has_home {
+            info.allocator = context.allocator
+            info.public_path, info.free_public = expand_home(home, publickey, context.allocator)
+            info.private_path,info.free_private = expand_home(home, privatekey, context.allocator)
+            delete(home, context.allocator)
+        } else {
+            info.public_path = publickey
+            info.private_path = privatekey
         }
+        auth = info
+
     case:
         return lua.L_error(L, "unknown authentication method: '%s'", auth_type)
     }
@@ -430,6 +449,9 @@ Auth_Publickey_File :: struct {
     public_path: cstring,
     private_path: cstring,
     passphrase: cstring, // can be nil btw
+    allocator: runtime.Allocator,
+    free_public: bool,
+    free_private: bool,
 }
 
 Auth_Agent :: struct { }
@@ -443,7 +465,7 @@ Auth_Method :: union {
 
 // a session may be returned even if err != .None in case ssh.get_error(session) returns something useful.
 // Don't forget to call ssh.free(session) after you copy the message. The error and sessio have the same lifetime.
-make_session :: proc "contextless" (host: cstring, user: cstring, port: c.int, auth_method: Auth_Method) -> (Session, Make_Session_Error) {
+make_session :: proc (host: cstring, user: cstring, port: c.int, auth_method: Auth_Method) -> (Session, Make_Session_Error) {
     session := ssh.new()
     if session == nil {
         return nil, .Cant_Make_Session
@@ -498,6 +520,15 @@ make_session :: proc "contextless" (host: cstring, user: cstring, port: c.int, a
         err = Make_Session_Error(ssh.Auth(auth_status))
 
     case Auth_Publickey_File:
+        defer {
+            if auth.free_public {
+                delete(auth.public_path, allocator = auth.allocator)
+            }
+            if auth.free_private {
+                delete(auth.private_path, allocator = auth.allocator)
+            }
+        }
+
         // grab public key
         pub_key: ssh.Key
         status = ssh.pki_import_pubkey_file(auth.public_path, &pub_key)
