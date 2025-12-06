@@ -99,7 +99,7 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
         context = runtime.default_context()
         lua.L_checktype(L, 1, .TABLE) // [self]
         lua.getfield(L, 1, "session") // [self, session]
-        userdata := transmute(^Session) lua.touserdata(L, -1)
+        userdata := cast(^Session) lua.touserdata(L, -1)
         session := userdata^
         lua.pop(L, 1) // [self]
 
@@ -235,7 +235,7 @@ define_ssh_session_metatable :: proc(L: ^lua.State) {
 
     // __gc
     lua.pushcfunction(L, proc "c" (L: ^lua.State) -> c.int {
-        userdata := transmute(^Session) lua.touserdata(L, 1)
+        userdata := cast(^Session) lua.touserdata(L, 1)
         session := userdata^
         if ssh.is_connected(session) {
             ssh.disconnect(session)
@@ -248,15 +248,16 @@ define_ssh_session_metatable :: proc(L: ^lua.State) {
     // __index
     lua.newtable(L)
 
+    // @param args string
+    // @param opts? table
     // sh(args, opts)
     lua.pushcfunction(L, proc "c" (L: ^lua.State) -> c.int {
-        // @param args string
-        // @param opts? table
         // [self, args, opts]
         num_args := lua.gettop(L)
 
+        // session
         lua.L_checkudata(L, 1, METATABLE_SESSION)
-        userdata := transmute(^Session) lua.touserdata(L, 1)
+        userdata := cast(^Session) lua.touserdata(L, 1)
         session := userdata^
         lua.L_checkstring(L, 2) // args is string
 
@@ -280,10 +281,12 @@ define_ssh_session_metatable :: proc(L: ^lua.State) {
             lua_check_and_set(L, "stdin", {.NIL, .STRING, .FUNCTION}, "expected boolean or callback")
             lua_check_and_set(L, "stdout", {.NIL, .USERDATA}, "expected buffer", metatable="buffer")
             lua_check_and_set(L, "stderr", {.NIL, .USERDATA}, "expected buffer", metatable="buffer")
-            lua.pop(L, 1)
+            lua.pop(L, 1) // pop opts
         }
+
         return 1
     })
+
     lua.setfield(L, -2, "sh")
 
     lua.setfield(L, -2, "__index")
@@ -371,7 +374,7 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
     }
 
     userdata := lua.newuserdata(L, size_of(Session))
-    userdata_session := transmute(^Session) userdata
+    userdata_session := cast(^Session) userdata
     userdata_session^ = session
     lua.L_setmetatable(L, METATABLE_SESSION) // lua 5.2 or luajit
 
