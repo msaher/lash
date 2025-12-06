@@ -334,7 +334,7 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
         lua.pop(L, 1)
 
     case:
-        lua.L_error(L, "TODO!")
+        lua.L_error(L, "unknown authentication method: '%s'", auth_type)
     }
 
     session, err := make_session(host, user, port, auth)
