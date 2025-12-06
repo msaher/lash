@@ -318,6 +318,9 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
     case "publickey":
         lua_check(L, -1, "passphrase", {.STRING, .NIL}, "expected string")
         auth = Auth_Publickey_Auto { lua_tostring_pop(L) }
+    case "agent":
+        auth = Auth_Agent{}
+        lua.pop(L, 1)
     // TODO: expand homedir ~
     case "publickey_file":
         _, passphrase := lua_check(L, -1, "passphrase", {.STRING, .NIL}, "expected string"), lua_tostring_pop(L)
@@ -328,11 +331,6 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
             private_path = privatekey,
             passphrase = passphrase,
         }
-
-    case "agent":
-        auth = Auth_Agent{}
-        lua.pop(L, 1)
-
     case:
         lua.L_error(L, "unknown authentication method: '%s'", auth_type)
     }
