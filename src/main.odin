@@ -125,7 +125,7 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
         case .FUNCTION:
             lua.call(L, 0, 1)
             if !lua.isstring(L, -1) {
-                lua.L_error(L, "stdin callback: expected to return string, returned %s", lua.L_typename(L, -1))
+                return lua.L_error(L, "stdin callback: expected to return string, returned %s", lua.L_typename(L, -1))
             }
             stdin_str = lua.tostring(L, -1)
             lua.pop(L, 1)
@@ -137,7 +137,7 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
             lua_push_errmsg(L, msg)
             ssh.free(session)
             if msg != nil {
-                lua.error(L)
+                return lua.error(L)
             } else {
                 lua_error_from_enum(L, err)
             }
@@ -148,11 +148,11 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
         if stdin_str != "" {
             n := ssh.channel_write(channel, rawptr(stdin_str), u32(len(stdin_str)))
             if n == ssh.ERROR {
-                lua.L_error(L, "%s", ssh.get_error(session))
+                return lua.L_error(L, "%s", ssh.get_error(session))
             }
             status := ssh.channel_send_eof(channel)
             if status != ssh.OK {
-                lua.L_error(L, "%s", ssh.get_error(session))
+                return lua.L_error(L, "%s", ssh.get_error(session))
             }
         }
 
@@ -200,7 +200,7 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
             msg := ssh.get_error(session)
             lua_push_errmsg(L, msg)
             ssh.free(session)
-            lua.error(L)
+            return lua.error(L)
         }
 
         // exit_state (to be returned)
@@ -309,7 +309,7 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
     port := c.int(port_float)
     is_integer := lua.Number(port) == port_float
     if !is_integer {
-        lua.L_error(L, "port: expected integer, got floating point")
+        return lua.L_error(L, "port: expected integer, got floating point")
     }
 
     lua_check(L, -1, "auth", {.TABLE}, "expected table")
@@ -337,7 +337,7 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
             passphrase = passphrase,
         }
     case:
-        lua.L_error(L, "unknown authentication method: '%s'", auth_type)
+        return lua.L_error(L, "unknown authentication method: '%s'", auth_type)
     }
 
     session, err := make_session(host, user, port, auth)
@@ -347,7 +347,7 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
             if msg != "" {
                 lua_push_errmsg(L, msg)
                 ssh.free(session)
-                lua.error(L)
+                return lua.error(L)
             }
             ssh.free(session)
         }
@@ -357,22 +357,22 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
             #partial switch err {
             // TODO: distinguish between permissions and existence for EOF_*
             case .EOF_Publickey:
-                lua.L_error(L, "can't read publickey: %s", auth_with_files.public_path)
+                return lua.L_error(L, "can't read publickey: %s", auth_with_files.public_path)
             case .EOF_Privatekey:
-                lua.L_error(L, "can't read privatekey: %s", auth_with_files.private_path)
+                return lua.L_error(L, "can't read privatekey: %s", auth_with_files.private_path)
             case .Cant_Import_Privatekey:
-                lua.L_error(L, "error occursed while reading private key: %s", auth_with_files.private_path)
+                return lua.L_error(L, "error occursed while reading private key: %s", auth_with_files.private_path)
             case .Cant_Import_Publickey:
-                lua.L_error(L, "error occursed while reading public key: %s", auth_with_files.private_path)
+                return lua.L_error(L, "error occursed while reading public key: %s", auth_with_files.private_path)
             }
         }
 
         msg := MAKE_SESSION_ERROR_MESSAGES[err]
         if msg != "" {
             lua_push_errmsg(L, msg)
-            lua.error(L)
+            return lua.error(L)
         } else {
-            lua.L_error(L, "An unkown error occured while creating the session")
+            return lua.L_error(L, "An unkown error occured while creating the session")
         }
     }
 
@@ -633,17 +633,17 @@ entry_point :: proc() -> int {
 
     // @param prompt string?
     // @param opts? {blind?: boolean}
-    // @return (string?, error)
+    // @return string?
     // input()
     lua.pushcfunction(L, proc "c" (L: ^lua.State) -> c.int {
         num_args := lua.gettop(L)
         if num_args < 1 {
-            lua.L_error(L, "Expected at least 1 argument")
+            return lua.L_error(L, "Expected at least 1 argument")
         }
 
         has_prompt := lua.isstring(L, 1)
         if !lua.isnil(L, 1) && !has_prompt {
-            lua.L_error(L, "prompt: expected string, got %s", lua.L_typename(L, 1))
+            return lua.L_error(L, "prompt: expected string, got %s", lua.L_typename(L, 1))
         }
 
         context = runtime.default_context()
@@ -658,7 +658,7 @@ entry_point :: proc() -> int {
             lua.getfield(L, 2, "echo")
             if !lua.isnil(L, -1) {
                 if !lua.isboolean(L, -1) {
-                    lua.L_error(L, "echo: expected boolean, got %s", lua.L_typename(L, -1))
+                    return lua.L_error(L, "echo: expected boolean, got %s", lua.L_typename(L, -1))
                 }
                 want_echo = lua.toboolean(L, -1)
             }
@@ -684,12 +684,12 @@ entry_point :: proc() -> int {
             err := bufio.scanner_error(&stdin_scanner)
             bufio.scanner_destroy(&stdin_scanner)
             if err == nil { // nil means EOF
-                lua.L_error(L, "EOF when reading a line")
+                return lua.L_error(L, "EOF when reading a line")
             }
             msg := fmt.caprint(err)
             lua_push_errmsg(L, msg)
             delete(msg)
-            lua.error(L)
+            return lua.error(L)
         }
 
         line := bufio.scanner_text(&stdin_scanner)

@@ -258,7 +258,7 @@ foreign lj {
 	gc :: proc(L: ^State, what: GCWhat, data: c.int) -> GCValue ---
 
 	// Miscellaneous functions
-	error		:: proc(L: ^State)						-> Status	---
+	error		:: proc(L: ^State)						-> c.int	---
 	next		:: proc(L: ^State, idx: c.int)			-> b32	---
 	concat		:: proc(L: ^State, n: c.int)						---
 	getallocf	:: proc(L: ^State, ud: ^rawptr)			-> Alloc	---
