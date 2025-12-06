@@ -13,6 +13,9 @@ import "core:sys/posix"
 import "base:runtime"
 import "core:c/libc"
 
+// TODO use -vet
+// dont transmute when you can cast smh
+
 USAGE :: "run FILENAME"
 
 METATABLE_SESSION :: "SshSession"
@@ -24,6 +27,51 @@ lua_error_from_enum :: proc "contextless" (L: ^lua.State, err: any) {
     lua.pushstring(L, msg)
     delete(msg)
     lua.error(L)
+}
+
+// lua_check_type :: proc "contextless" (L: ^lua.State, name)
+
+// check luajit's string.buffer
+// lua.testudata is not useful because it seems the string.buffer metatable is not in the registery
+// as a hacky workaround we check for the existence of some methods until we figure how to properly do it
+luajit_is_buffer :: proc "contextless" (L: ^lua.State) -> bool {
+    methods := []cstring{"put", "tostring"}
+    for method in methods {
+        lua.getfield(L, -1, method)
+        defer lua.pop(L, 1)
+        if lua.type(L, -1) != .FUNCTION {
+            return false
+        }
+    }
+    return true
+}
+
+lua_check_userdata :: proc "contextless" (L: ^lua.State, metatable: cstring) -> bool {
+    if metatable == "buffer" {
+        if !luajit_is_buffer(L) {
+            return false
+        }
+    } else if lua.L_testudata(L, -1, metatable) == nil {
+        return false
+    }
+    return true
+}
+
+lua_check :: proc "contextless" (L: ^lua.State, idx: lua.Index, name: cstring, allowed_types: bit_set[lua.Type], msg: cstring, metatable: cstring = "") -> lua.Type {
+    lua.getfield(L, idx, name)
+    type := lua.type(L, -1)
+    if .NIL in allowed_types && type == .NIL {
+        return .NIL
+    }
+    if type not_in allowed_types {
+        type_name := lua.L_typename(L, -1)
+        lua.L_error(L, "%s: %s, got %s", name, msg, type_name)
+    }
+    if type == .USERDATA && !lua_check_userdata(L, metatable) {
+        type_name := lua.L_typename(L, -1)
+        lua.L_error(L, "%s: %s, got %s", name, msg, type_name)
+    }
+    return type
 }
 
 // [target, table, field]
@@ -38,14 +86,17 @@ lua_check_and_set :: proc "contextless" (L: ^lua.State, name: cstring, allowed_t
         type_name := lua.L_typename(L, -1)
         lua.L_error(L, "%s: %s, got %s", name, msg, type_name)
     }
-    if type == .USERDATA {
-        if lua.L_testudata(L, -1, metatable) == nil {
-            type_name := lua.L_typename(L, -1)
-            lua.L_error(L, "%s: %s, got %s", name, msg, type_name)
-        }
-        lua.pop(L, 1)
+    if type == .USERDATA && !lua_check_userdata(L, metatable) {
+        type_name := lua.L_typename(L, -1)
+        lua.L_error(L, "%s: %s, got %s", name, msg, type_name)
     }
     lua.setfield(L, -3, name)
+}
+
+lua_tostring_pop :: proc "contextless" (L: ^lua.State) -> cstring {
+    s := lua.tostring(L, -1)
+    lua.pop(L, 1)
+    return s
 }
 
 define_ssh_cmd_metatable :: proc(L: ^lua.State) {
@@ -71,15 +122,25 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
 
         // self.pty
         pty: b32 = false
-        lua.getfield(L, 1, "pty") // [self, pty]
-        if !lua.isnil(L, -1) {
-            if lua.isboolean(L, -1) {
-                pty = lua.toboolean(L, -1)
-            } else {
-                lua.L_error(L, "pty: expected boolean, got %s", lua.L_typename(L, -1))
-            }
+        if lua_check(L, 1, "pty", {.NIL, .BOOLEAN}, "expected boolean") == .BOOLEAN {
+            pty = lua.toboolean(L, -1)
         }
         lua.pop(L, 1)
+
+        stdin_type := lua_check(L, 1, "stdin", {.NIL, .STRING, .FUNCTION}, "expected string or callback")
+        stdin_str: cstring
+        #partial switch stdin_type {
+        case .STRING:
+            stdin_str = lua.tostring(L, -1)
+            lua.pop(L, 1)
+        case .FUNCTION:
+            lua.call(L, 0, 1)
+            if !lua.isstring(L, -1) {
+                lua.L_error(L, "stdin callback: expected to return string, returned %s", lua.L_typename(L, -1))
+            }
+            stdin_str = lua.tostring(L, -1)
+            lua.pop(L, 1)
+        }
 
         channel, err := session_exec_no_read(session, args, pty)
         if err != .None {
@@ -92,33 +153,9 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
             }
         }
 
-        // [self, stdout, stderr, stdin]
-        lua.getfield(L, 1, "stdout")
-        lua.getfield(L, 1, "stderr")
-        lua.getfield(L, 1, "stdin")
-        stdout_idx: lua.Index = 2
-        stderr_idx: lua.Index = 3
-        stdin_idx: lua.Index = 4
-
         // write stdin, if any
         // TODO: support string.buffer and lua files
-        if !lua.isnil(L, stdin_idx) {
-            if !lua.isstring(L, stdin_idx) && !lua.isfunction(L, stdin_idx) {
-                lua.L_error(L, "stdin: expected string or function, got %s", lua.L_typename(L, stdin_idx))
-            }
-
-            stdin_str: cstring = nil
-            if lua.isstring(L, stdin_idx) {
-                stdin_str = lua.tostring(L, stdin_idx)
-            } else {
-                // TODO: maybe this should be an iterator that I call repeatedly in a loop?
-                lua.call(L, 0, 1)
-                if !lua.isstring(L, stdin_idx) {
-                    lua.L_error(L, "stdin callback: expected to return string, returned %s", lua.L_typename(L, stdin_idx))
-                }
-                stdin_str = lua.tostring(L, stdin_idx)
-            }
-            // stdin_str := lua.tostring(L, stdin_idx) // only strings supported right now
+        if stdin_str != "" {
             n := ssh.channel_write(channel, rawptr(stdin_str), u32(len(stdin_str)))
             if n == ssh.ERROR {
                 lua.L_error(L, "%s", ssh.get_error(session))
@@ -129,10 +166,11 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
             }
         }
 
-        // TODO: check stdout and stderr
+        stdout_type, stdout_idx := lua_check(L, 1, "stdout", {.NIL, .USERDATA}, "expected buffer", "buffer"), lua.gettop(L)
+        stderr_type, stderr_idx := lua_check(L, 1, "stderr", {.NIL, .USERDATA}, "expected buffer", "buffer"), lua.gettop(L)
 
-        stdout_done := lua.isnil(L, stdout_idx)
-        stderr_done := lua.isnil(L, stderr_idx) || pty // ptys have stderr and stdout merged
+        stdout_done := stdout_type == .NIL
+        stderr_done := stderr_type == .NIL || pty // ptys have stderr and stdout merged
         buf: [1024]u8 = ---
         n: c.int
         for !stdout_done || !stderr_done {
@@ -248,6 +286,7 @@ define_ssh_session_metatable :: proc(L: ^lua.State) {
 
         // cmd.opts
         if num_args >= 3 {
+            context = runtime.default_context()
             lua.pushvalue(L, 3) // [self, args, opts, cmd, opts]
             lua_check_and_set(L, "pty", {.NIL, .BOOLEAN}, "expected boolean")
             lua_check_and_set(L, "stdin", {.NIL, .STRING, .FUNCTION}, "expected boolean or callback")
@@ -267,97 +306,39 @@ define_ssh_session_metatable :: proc(L: ^lua.State) {
 lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
     lua.L_checktype(L, 1, lua.TTABLE);
 
-    // table.host
-    lua.getfield(L, 1, "host")
-    idx := lua.gettop(L)
-    if !lua.isstring(L, idx) {
-        lua.L_error(L, "host: expected string, got %s", lua.L_typename(L, idx))
-    }
-    host := lua.tostring(L, idx)
-    lua.pop(L, 1)
+    _, host := lua_check(L, -1, "host", {.STRING}, "expected string"), lua_tostring_pop(L)
+    _, user := lua_check(L, -1, "user", {.STRING}, "expected string"), lua_tostring_pop(L)
 
-    // table.user
-    lua.getfield(L, 1, "user")
-    idx = lua.gettop(L)
-    if !lua.isstring(L, idx) {
-        lua.L_error(L, "user: expected string, got %s", lua.L_typename(L, idx))
-    }
-    user := lua.tostring(L, idx)
+    lua_check(L, -1, "port", {.NUMBER}, "expected integer")
+    port_float := lua.tonumber(L, -1)
     lua.pop(L, 1)
-
-    // table.port
-    lua.getfield(L, 1, "port")
-    idx = lua.gettop(L)
-    if !lua.isnumber(L, idx) {
-        lua.L_error(L, "port: expected integer, got %s", lua.L_typename(L, idx))
-    }
-    port_float := lua.tonumber(L, idx)
     port := c.int(port_float)
     is_integer := lua.Number(port) == port_float
     if !is_integer {
         lua.L_error(L, "port: expected integer, got floating point")
     }
-    lua.pop(L, 1)
 
-    // table.auth
-    lua.getfield(L, 1, "auth")
-    lua.L_checktype(L, -1, .TABLE)
-
-    // type(auth.type) == "string"
-    lua.getfield(L, -1, "type")
-    if !lua.isstring(L, -1) {
-        lua.L_error(L, "Invalid auth method")
-    }
-    auth_type := lua.tostring(L, -1)
-    lua.pop(L, 1)
+    lua_check(L, -1, "auth", {.TABLE}, "expected table")
+    _, auth_type := lua_check(L, -1, "type", {.STRING}, "Invalid auth type"), lua_tostring_pop(L)
 
     auth: Auth_Method
     switch auth_type {
     case "password":
-        lua.getfield(L, -1, "password")
-        if !lua.isstring(L, -1) {
-            lua.L_error(L, "password: expected string, got %s", lua.L_typename(L, -1))
-        }
-        auth = Auth_Password { lua.tostring(L, -1) }
-        lua.pop(L, 1)
-
+        lua_check(L, -1, "password", {.STRING, .NIL}, "expected string")
+        auth = Auth_Password { lua_tostring_pop(L) }
     case "publickey":
-        lua.getfield(L, -1, "passphrase")
-        if !lua.isnil(L, -1) && !lua.isstring(L, -1) {
-            lua.L_error(L, "passphrase: expected string, got %s", lua.L_typename(L, -1))
-        }
-        auth = Auth_Publickey_Auto { lua.tostring(L, -1) }
-        lua.pop(L, 1)
-
+        lua_check(L, -1, "passphrase", {.STRING, .NIL}, "expected string")
+        auth = Auth_Publickey_Auto { lua_tostring_pop(L) }
     // TODO: expand homedir ~
     case "publickey_file":
-        lua.getfield(L, -1, "passphrase")
-        if !lua.isnil(L, -1) && !lua.isstring(L, -1) {
-            lua.L_error(L, "passphrase: expected string, got %s", lua.L_typename(L, -1))
-        }
-        passphrase := lua.tostring(L, -1)
-        lua.pop(L, 1)
-
-        lua.getfield(L, -1, "publickey")
-        if !lua.isstring(L, -1) {
-            lua.L_error(L, "publickey: expected string, got %s", lua.L_typename(L, -1))
-        }
-        publickey := lua.tostring(L, -1)
-        lua.pop(L, 1)
-
-        lua.getfield(L, -1, "privatekey")
-        if !lua.isstring(L, -1) {
-            lua.L_error(L, "privatekey: expected string, got %s", lua.L_typename(L, -1))
-        }
-        privatekey := lua.tostring(L, -1)
-
+        _, passphrase := lua_check(L, -1, "passphrase", {.STRING, .NIL}, "expected string"), lua_tostring_pop(L)
+        _, publickey  := lua_check(L, -1, "publickey", {.STRING}, "expected string"), lua_tostring_pop(L)
+        _, privatekey := lua_check(L, -1, "privatekey", {.STRING}, "expected string"), lua_tostring_pop(L)
         auth = Auth_Publickey_File {
             public_path = publickey,
             private_path = privatekey,
             passphrase = passphrase,
         }
-        lua.pop(L, 1)
-
 
     case "agent":
         auth = Auth_Agent{}
