@@ -88,15 +88,6 @@ lua_tostring_pop :: proc "contextless" (L: ^lua.State) -> cstring {
     return s
 }
 
-expand_home :: proc (home: string, src: cstring, allocator := context.allocator) -> (cstring, bool) {
-    slice := cast([^]u8)src
-    if slice[0] == '~' {
-        substring := cstring(slice[1:])
-        return fmt.caprintf("%s%s", home, substring), true
-    }
-    return src, false
-}
-
 define_ssh_cmd_metatable :: proc(L: ^lua.State) {
     lua.L_newmetatable(L, METATABLE_SSH_CMD)
 
@@ -337,23 +328,50 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
         auth = Auth_Agent{}
         lua.pop(L, 1)
     case "publickey_file":
-        info := Auth_Publickey_File {}
         _, passphrase := lua_check(L, -1, "passphrase", {.STRING, .NIL}, "expected string"), lua_tostring_pop(L)
         _, publickey  := lua_check(L, -1, "publickey", {.STRING}, "expected string"), lua_tostring_pop(L)
         _, privatekey := lua_check(L, -1, "privatekey", {.STRING}, "expected string"), lua_tostring_pop(L)
-        info.passphrase = passphrase
 
-        home, has_home := os.lookup_env_alloc("HOME", context.allocator)
-        if has_home {
-            info.allocator = context.allocator
-            info.public_path, info.free_public = expand_home(home, publickey, context.allocator)
-            info.private_path,info.free_private = expand_home(home, privatekey, context.allocator)
-            delete(home, context.allocator)
-        } else {
-            info.public_path = publickey
-            info.private_path = privatekey
+        starts_with_tilde :: #force_inline proc "contextless" (str: cstring) -> bool {
+            slice := cast([^]u8)str
+            return slice[0] == '~'
         }
-        auth = info
+
+        // string.gsub(str, "^~", home)
+        expand_home :: #force_inline proc "contextless" (L: ^lua.State, str: cstring, home: cstring) -> cstring {
+            lua.getglobal(L, "string")
+            lua.getfield(L, -1, "gsub")
+            lua.pushstring(L, str) // x
+            lua.pushstring(L, "^~")
+            lua.pushstring(L, home)
+            lua.call(L, 3, 1)
+            return lua.tostring(L, -1)
+        }
+
+        if starts_with_tilde(publickey) || starts_with_tilde(privatekey) {
+            // error if $HOME is not defined
+            lua.getglobal(L, "os")
+            lua.getfield(L, -1, "getenv")
+            lua.pushstring(L, "HOME")
+            lua.call(L, 1, 1)
+            if lua.isnil(L, -1) {
+                return lua.L_error(L, "$HOME is not defined")
+            }
+
+            home := lua.tostring(L, -1)
+            if starts_with_tilde(publickey) {
+                publickey = expand_home(L, publickey, home)
+            }
+            if starts_with_tilde(privatekey) {
+                privatekey = expand_home(L, privatekey, home)
+            }
+        }
+
+        auth = Auth_Publickey_File {
+            passphrase = passphrase,
+            public_path = publickey,
+            private_path = privatekey,
+        }
 
     case:
         return lua.L_error(L, "unknown authentication method: '%s'", auth_type)
@@ -449,9 +467,6 @@ Auth_Publickey_File :: struct {
     public_path: cstring,
     private_path: cstring,
     passphrase: cstring, // can be nil btw
-    allocator: runtime.Allocator,
-    free_public: bool,
-    free_private: bool,
 }
 
 Auth_Agent :: struct { }
@@ -520,15 +535,6 @@ make_session :: proc (host: cstring, user: cstring, port: c.int, auth_method: Au
         err = Make_Session_Error(ssh.Auth(auth_status))
 
     case Auth_Publickey_File:
-        defer {
-            if auth.free_public {
-                delete(auth.public_path, allocator = auth.allocator)
-            }
-            if auth.free_private {
-                delete(auth.private_path, allocator = auth.allocator)
-            }
-        }
-
         // grab public key
         pub_key: ssh.Key
         status = ssh.pki_import_pubkey_file(auth.public_path, &pub_key)
