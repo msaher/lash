@@ -17,6 +17,9 @@ USAGE :: "run FILENAME"
 METATABLE_SESSION :: "SshSession"
 METATABLE_SSH_CMD :: "SshCmd"
 
+// metatable name for lua files
+LUAFILE_HANDLE :: "FILE*"
+
 lua_push_errmsg :: proc "contextless" (L: ^lua.State, msg: cstring) {
     lua.L_where(L, 1)
     lua.pushstring(L, msg)
@@ -36,35 +39,56 @@ luajit_is_buffer :: proc "contextless" (L: ^lua.State, idx: lua.Index) -> bool {
     result := lua.rawequal(L, -1, idx) // rawequal does not push anything btw
     lua.pop(L, 1) // pop the buffer metatable
 
-lua_check_userdata :: proc "contextless" (L: ^lua.State, metatable: cstring) -> bool {
-    if metatable == "buffer" {
-        if !luajit_is_buffer(L) {
-            return false
-        }
-    } else if lua.L_testudata(L, -1, metatable) == nil {
-        return false
-    }
-    return true
+    return bool(result)
 }
 
-lua_check :: proc "contextless" (L: ^lua.State, idx: lua.Index, name: cstring, allowed_types: bit_set[lua.Type], msg: cstring, metatable: cstring = "") -> lua.Type {
+lua_check :: proc "contextless" (L: ^lua.State, idx: lua.Index, name: cstring, allowed_types: bit_set[lua.Type], msg: cstring) -> lua.Type {
     lua.getfield(L, idx, name)
     type := lua.type(L, -1)
     if .NIL in allowed_types && type == .NIL {
         return .NIL
     }
-    fail := (type not_in allowed_types) ||
-            (type == .USERDATA && !lua_check_userdata(L, metatable))
-    if fail {
+
+    if type not_in allowed_types {
         type_name := lua.L_typename(L, -1)
         lua.L_error(L, "%s: %s, got %s", name, msg, type_name)
     }
     return type
 }
 
+
+lua_check_with_udata :: proc "contextless" (L: ^lua.State, idx: lua.Index, name: cstring, allowed_types: bit_set[lua.Type], msg: cstring, metatables := []cstring{}) -> (lua.Type, cstring) {
+    type := lua_check(L, idx, name, allowed_types | {.USERDATA}, msg)
+    if type != .USERDATA {
+        return type, ""
+    }
+
+    match_metatable :: proc "contextless" (L: ^lua.State, idx: lua.Index, metatables: []cstring) -> (cstring, bool) {
+        lua.getmetatable(L, idx)
+        defer lua.pop(L, 1)
+
+        for metatable in metatables {
+            if metatable == "buffer" && luajit_is_buffer(L, -1) {
+                return metatable, true
+            } else if lua.L_testudata(L, -1, metatable) != nil {
+                return metatable, true
+            }
+        }
+        return "", false
+    }
+
+    metatable, found := match_metatable(L, idx, metatables)
+    if !found {
+        type_name := lua.L_typename(L, -1)
+        lua.L_error(L, "%s: %s, got %s", name, msg, type_name)
+    }
+    return type, metatable
+
+}
+
 // [target, table, field]
-lua_check_and_set :: proc "contextless" (L: ^lua.State, name: cstring, allowed_types: bit_set[lua.Type], msg: cstring, metatable: cstring = "") {
-    type := lua_check(L, -1, name, allowed_types, msg, metatable)
+lua_check_and_set :: proc "contextless" (L: ^lua.State, name: cstring, allowed_types: bit_set[lua.Type], msg: cstring, metatables := []cstring{}) {
+    type, _ := lua_check_with_udata(L, -1, name, allowed_types, msg, metatables)
     if type != .NIL {
         lua.setfield(L, -3, name)
     } else {
@@ -146,8 +170,8 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
             }
         }
 
-        stdout_type, stdout_idx := lua_check(L, 1, "stdout", {.NIL, .USERDATA}, "expected buffer", "buffer"), lua.gettop(L)
-        stderr_type, stderr_idx := lua_check(L, 1, "stderr", {.NIL, .USERDATA}, "expected buffer", "buffer"), lua.gettop(L)
+        stdout_type, _, stdout_idx := lua_check_with_udata(L, 1, "stdout", {.NIL, .USERDATA}, "expected buffer", []cstring{"buffer"}), lua.gettop(L)
+        stderr_type, _, stderr_idx := lua_check_with_udata(L, 1, "stderr", {.NIL, .USERDATA}, "expected buffer", []cstring{"buffer"}), lua.gettop(L)
 
         stdout_done := stdout_type == .NIL
         stderr_done := stderr_type == .NIL || pty // ptys have stderr and stdout merged
@@ -272,8 +296,8 @@ define_ssh_session_metatable :: proc(L: ^lua.State) {
             lua.pushvalue(L, 3) // [self, args, opts, cmd, opts]
             lua_check_and_set(L, "pty", {.NIL, .BOOLEAN}, "expected boolean")
             lua_check_and_set(L, "stdin", {.NIL, .STRING, .FUNCTION}, "expected boolean or callback")
-            lua_check_and_set(L, "stdout", {.NIL, .USERDATA}, "expected buffer", metatable="buffer")
-            lua_check_and_set(L, "stderr", {.NIL, .USERDATA}, "expected buffer", metatable="buffer")
+            lua_check_and_set(L, "stdout", {.NIL, .USERDATA}, "expected buffer", metatables=[]cstring{"buffer"})
+            lua_check_and_set(L, "stderr", {.NIL, .USERDATA}, "expected buffer", metatables=[]cstring{"buffer"})
             lua.pop(L, 1) // pop opts
         }
 
@@ -327,7 +351,7 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
             return slice[0] == '~'
         }
 
-        // string.gsub(str, "^~", home)
+        // calls string.gsub(str, "^~", home)
         expand_home :: #force_inline proc "contextless" (L: ^lua.State, str: cstring, home: cstring) -> cstring {
             lua.getglobal(L, "string")
             lua.getfield(L, -1, "gsub")
