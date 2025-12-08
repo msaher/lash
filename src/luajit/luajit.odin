@@ -485,7 +485,7 @@ foreign lj {
 		lst: [^]cstring)													-> c.int	---
 
 
-	L_ref			:: proc(L: ^State, t: c.int)							-> Ref		---
+	L_ref			:: proc(L: ^State, t: c.int)							-> c.int    ---
 	L_unref			:: proc(L: ^State, t, ref: c.int)									---
 
 	L_loadfile		:: proc(L: ^State, filename: cstring)					-> Status	---
