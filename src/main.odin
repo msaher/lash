@@ -130,19 +130,32 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
         }
         lua.pop(L, 1)
 
-        stdin_type := lua_check(L, 1, "stdin", {.NIL, .STRING, .FUNCTION}, "expected string or callback")
-        stdin_str: cstring
+        stdin_type, metatable := lua_check_with_udata(L, 1, "stdin", {.NIL, .STRING, .FUNCTION}, "expected string or callback", []cstring{"buffer"})
+        stdin_bytes: [^]byte
+        stdin_len: int
         #partial switch stdin_type {
         case .STRING:
-            stdin_str = lua.tostring(L, -1)
+            str := lua.tostring(L, -1)
+            stdin_bytes, stdin_len = transmute([^]u8) str, len(str)
             lua.pop(L, 1)
+
         case .FUNCTION:
             lua.call(L, 0, 1)
             if !lua.isstring(L, -1) {
                 return lua.L_error(L, "stdin callback: expected to return string, returned %s", lua.L_typename(L, -1))
             }
-            stdin_str = lua.tostring(L, -1)
+            str := lua.tostring(L, -1)
+            stdin_bytes, stdin_len = transmute([^]u8) str, len(str)
             lua.pop(L, 1)
+
+        case .USERDATA:
+            // local stdin_bytes, stdin_len = buf:ref()
+            lua.getfield(L, -1, "ref")
+            lua.pushvalue(L, -2)
+            lua.call(L, 1, 2)
+            stdin_len = int(lua.tointeger(L, -1))
+            stdin_bytes = transmute([^]u8) lua.tostring(L, -2)
+            lua.pop(L, 4) // buf, ref, bytes, len
         }
 
         channel, err := session_exec_no_read(session, args, pty)
@@ -155,10 +168,10 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
             }
         }
 
+        // TODO: support lua files
         // write stdin, if any
-        // TODO: support string.buffer and lua files
-        if stdin_str != "" {
-            n := ssh.channel_write(channel, rawptr(stdin_str), u32(len(stdin_str)))
+        if stdin_bytes != nil {
+            n := ssh.channel_write(channel, rawptr(stdin_bytes), u32(stdin_len))
             if n == ssh.ERROR {
                 return lua.L_error(L, "%s", ssh.get_error(session))
             }
@@ -209,8 +222,7 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
         ssh.channel_free(channel)
 
         if status != ssh.OK {
-            msg := ssh.get_error(session)
-            return lua.error(L)
+            return lua.L_error(L, "%s", ssh.get_error(session))
         }
 
         // exit_state (to be returned)
