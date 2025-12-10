@@ -148,8 +148,6 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
         channel, err := session_exec_no_read(session, args, pty)
         if err != .None {
             msg := ssh.get_error(session)
-            lua_push_errmsg(L, msg)
-            ssh.free(session)
             if msg != nil {
                 return lua.error(L)
             } else {
@@ -212,8 +210,6 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
 
         if status != ssh.OK {
             msg := ssh.get_error(session)
-            lua_push_errmsg(L, msg)
-            ssh.free(session)
             return lua.error(L)
         }
 
