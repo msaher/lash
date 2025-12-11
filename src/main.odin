@@ -26,12 +26,12 @@ lua_push_errmsg :: proc "contextless" (L: ^lua.State, msg: cstring) {
     lua.concat(L, 2)
 }
 
-lua_error_from_enum :: proc "contextless" (L: ^lua.State, err: any) {
+lua_error_from_enum :: proc "contextless" (L: ^lua.State, err: any) -> c.int {
     context = runtime.default_context()
     msg := fmt.caprint(err)
     lua_push_errmsg(L, msg)
     delete(msg)
-    lua.error(L)
+    return lua.error(L)
 }
 
 luajit_is_buffer :: proc "contextless" (L: ^lua.State, idx: lua.Index) -> bool {
@@ -164,7 +164,7 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
             if msg != nil {
                 return lua.error(L)
             } else {
-                lua_error_from_enum(L, err)
+                return lua_error_from_enum(L, err)
             }
         }
 
