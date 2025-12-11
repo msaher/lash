@@ -11,6 +11,7 @@ import "core:c"
 import "core:sys/posix"
 import "base:runtime"
 import "core:c/libc"
+import "core:io"
 
 USAGE :: "run FILENAME"
 
@@ -106,6 +107,49 @@ lua_tostring_pop :: proc "contextless" (L: ^lua.State) -> cstring {
     return s
 }
 
+// TODO: windows support
+is_file_readable :: proc "contextless" (fd: posix.FD) -> bool {
+    context = runtime.default_context()
+    flags := posix.fcntl(fd, .GETFL)
+    if flags == -1 {
+        fmt.println(posix.errno())
+        return false
+    }
+    access_mode := flags & c.int(posix.O_ACCMODE)
+
+    if access_mode == posix.O_RDONLY || access_mode == posix.O_RDWR {
+        return true
+    }
+
+    return false
+}
+
+write_to_channel :: proc (reader: io.Reader, channel: ssh.Channel) -> (io.Error, c.int) {
+    buf: [1024]u8 = ---
+    loop: for {
+        bytes_read, err := io.read(reader, buf[:])
+        if bytes_read == 0 {
+            #partial switch err {
+            case .None:
+            case .EOF : break loop
+            case      : return err, ssh.OK
+            }
+        }
+
+        offset := 0
+        for offset < bytes_read {
+            slice := buf[offset:bytes_read]
+            n := ssh.channel_write(channel, raw_data(slice), u32(len(slice)))
+            if n == ssh.ERROR {
+                return .None, ssh.ERROR
+            }
+            offset += int(n)
+        }
+    }
+    status := ssh.channel_send_eof(channel)
+    return .None, status
+}
+
 define_ssh_cmd_metatable :: proc(L: ^lua.State) {
     lua.L_newmetatable(L, METATABLE_SSH_CMD)
 
@@ -134,9 +178,11 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
         }
         lua.pop(L, 1)
 
-        stdin_type, metatable := lua_check_with_udata(L, 1, "stdin", {.NIL, .STRING, .FUNCTION}, "expected string or callback", []cstring{"buffer"})
+        stdin_type, metatable := lua_check_with_udata(L, 1, "stdin", {.NIL, .STRING, .FUNCTION, .USERDATA}, "expected string, callback, buffer, or file", []cstring{"buffer", LUAFILE_HANDLE})
         stdin_bytes: [^]byte
         stdin_len: int
+        reader: io.Reader
+        is_reader: bool
         #partial switch stdin_type {
         case .STRING:
             str := lua.tostring(L, -1)
@@ -153,13 +199,26 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
             lua.pop(L, 1)
 
         case .USERDATA:
-            // local stdin_bytes, stdin_len = buf:ref()
-            lua.getfield(L, -1, "ref")
-            lua.pushvalue(L, -2)
-            lua.call(L, 1, 2)
-            stdin_len = int(lua.tointeger(L, -1))
-            stdin_bytes = transmute([^]u8) lua.tostring(L, -2)
-            lua.pop(L, 4) // buf, ref, bytes, len
+            switch metatable {
+            case "buffer":
+                lua.getfield(L, -1, "ref")
+                lua.pushvalue(L, -2)
+                lua.call(L, 1, 2)
+                stdin_len = int(lua.tointeger(L, -1))
+                stdin_bytes = transmute([^]u8) lua.tostring(L, -2)
+                lua.pop(L, 4) // buf, ref, bytes, len
+
+            case LUAFILE_HANDLE:
+                cfile_ptr_ptr := cast(^^c.FILE) lua.touserdata(L, -1)
+                fd := posix.fileno(cfile_ptr_ptr^)
+                is_readable := is_file_readable(fd)
+                if !is_readable {
+                    return lua.L_error(L, "stdin is not a readable file descriptor")
+                }
+                file := os.new_file(uintptr(fd), "")
+                reader = os.to_reader(file)
+                is_reader = true
+            }
         }
 
         channel, err := session_exec_no_read(session, args, pty)
@@ -172,7 +231,6 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
             }
         }
 
-        // TODO: support lua files
         // write stdin, if any
         if stdin_bytes != nil {
             n := ssh.channel_write(channel, rawptr(stdin_bytes), u32(stdin_len))
@@ -183,10 +241,19 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
             if status != ssh.OK {
                 return lua.L_error(L, "%s", ssh.get_error(session))
             }
+        } else if metatable == LUAFILE_HANDLE {
+            io_err, ssh_err := write_to_channel(reader, channel)
+            if io_err != .None {
+                return lua_error_from_enum(L, io_err)
+            } else if ssh_err != ssh.OK {
+                return lua.L_error(L, "%s", ssh.get_error(session))
+            }
         }
 
-        stdout_type, _, stdout_idx := lua_check_with_udata(L, 1, "stdout", {.NIL, .USERDATA}, "expected buffer", []cstring{"buffer"}), lua.gettop(L)
-        stderr_type, _, stderr_idx := lua_check_with_udata(L, 1, "stderr", {.NIL, .USERDATA}, "expected buffer", []cstring{"buffer"}), lua.gettop(L)
+        stdout_type, _ := lua_check_with_udata(L, 1, "stdout", {.NIL, .USERDATA}, "expected buffer", []cstring{"buffer"})
+        stdout_idx := lua.gettop(L)
+        stderr_type, _ := lua_check_with_udata(L, 1, "stderr", {.NIL, .USERDATA}, "expected buffer", []cstring{"buffer"})
+        stderr_idx := lua.gettop(L)
 
         stdout_done := stdout_type == .NIL
         stderr_done := stderr_type == .NIL || pty // ptys have stderr and stdout merged
@@ -307,7 +374,7 @@ define_ssh_session_metatable :: proc(L: ^lua.State) {
             context = runtime.default_context()
             lua.pushvalue(L, 3) // [self, args, opts, cmd, opts]
             lua_check_and_set(L, "pty", {.NIL, .BOOLEAN}, "expected boolean")
-            lua_check_and_set(L, "stdin", {.NIL, .STRING, .FUNCTION}, "expected boolean or callback")
+            lua_check_and_set(L, "stdin", {.NIL, .STRING, .FUNCTION, .USERDATA}, "expected string, callback, buffer, or file", []cstring{"buffer", LUAFILE_HANDLE})
             lua_check_and_set(L, "stdout", {.NIL, .USERDATA}, "expected buffer", metatables=[]cstring{"buffer"})
             lua_check_and_set(L, "stderr", {.NIL, .USERDATA}, "expected buffer", metatables=[]cstring{"buffer"})
             lua.pop(L, 1) // pop opts
