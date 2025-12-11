@@ -34,12 +34,19 @@ lua_error_from_enum :: proc "contextless" (L: ^lua.State, err: any) -> c.int {
     return lua.error(L)
 }
 
+// check luajit's string.buffer
+// lua.testudata is not useful because it seems the string.buffer metatable is not in the registery
+// as a hacky workaround we check for the existence of some methods until we figure how to properly do it
 luajit_is_buffer :: proc "contextless" (L: ^lua.State, idx: lua.Index) -> bool {
-    lua.rawgeti(L, lua.REGISTRYINDEX, BUFFER_METATABLE_REF);
-    result := lua.rawequal(L, -1, idx) // rawequal does not push anything btw
-    lua.pop(L, 1) // pop the buffer metatable
-
-    return bool(result)
+    methods := []cstring{"put", "tostring", "ref"}
+    for method in methods {
+        lua.getfield(L, idx, method)
+        defer lua.pop(L, 1)
+        if lua.type(L, -1) != .FUNCTION {
+            return false
+        }
+    }
+    return true
 }
 
 lua_check :: proc "contextless" (L: ^lua.State, idx: lua.Index, name: cstring, allowed_types: bit_set[lua.Type], msg: cstring) -> lua.Type {
@@ -64,9 +71,6 @@ lua_check_with_udata :: proc "contextless" (L: ^lua.State, idx: lua.Index, name:
     }
 
     match_metatable :: proc "contextless" (L: ^lua.State, idx: lua.Index, metatables: []cstring) -> (cstring, bool) {
-        lua.getmetatable(L, idx)
-        defer lua.pop(L, 1)
-
         for metatable in metatables {
             if metatable == "buffer" && luajit_is_buffer(L, -1) {
                 return metatable, true
@@ -634,32 +638,6 @@ session_exec_no_read :: proc "contextless" (session: ssh.Session, cmd: cstring, 
     return channel, .None,
 }
 
-// set at startup
-BUFFER_METATABLE_REF: lua.Integer
-
-luajit_set_buffer_metatable_ref :: proc (L: ^lua.State) {
-    // require("string.buffer")
-    lua.getglobal(L, "require");
-    lua.pushstring(L, "string.buffer");
-    if lua.pcall(L, 1, 1, 0) != .OK {
-        panic("failed to require('string.buffer'). Are you using luajit?")
-    }
-    // [buffer]
-
-    // local b = buffer.new()
-    lua.getfield(L, -1, "new")
-    if lua.pcall(L, 0, 1, 0) != .OK {
-        panic("failed to call buffer.new()")
-    }
-    //[buffer, b]
-
-    lua.getmetatable(L, -1)
-    // [buffer, b, metatable]
-    BUFFER_METATABLE_REF = lua.Integer(lua.L_ref(L, lua.REGISTRYINDEX))
-    lua.pop(L, 3)
-    // []
-}
-
 entry_point :: proc() -> int {
     if len(os.args) != 3 || os.args[1] != "run" {
         fmt.eprintf("usage: %s %s\n", os.args[0], USAGE);
@@ -791,8 +769,6 @@ entry_point :: proc() -> int {
         return 1
     })
     lua.setfield(L, 1, "input")
-
-    luajit_set_buffer_metatable_ref(L)
 
     // evaluate init.lua
     status := lua.L_dofile(L, "src/runtime/init.lua");
