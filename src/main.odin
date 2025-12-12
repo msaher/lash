@@ -190,6 +190,26 @@ write_to_channel :: proc (reader: io.Reader, channel: ssh.Channel) -> (io.Error,
     return .None, status
 }
 
+// converts buffer or file to io.Writer
+lua_stdio_to_writer :: proc(L: ^lua.State, idx: lua.Index, buffer_writer: ^Buffer_Writer, metatable: cstring) -> (writer: io.Writer, mode: c.int, errno: posix.Errno) {
+    switch metatable {
+    case LUAFILE_HANDLE:
+        writer, mode, errno = lua_file_to_stream(L, idx)
+        return
+    case "buffer":
+        mode = -1
+        buffer_writer.L = L
+        buffer_writer.idx = idx
+        writer = io.Writer {
+            procedure = buffer_writer_proc,
+            data = buffer_writer,
+        }
+        return
+    case:
+        panic("unreachable")
+    }
+}
+
 define_ssh_cmd_metatable :: proc(L: ^lua.State) {
     lua.L_newmetatable(L, METATABLE_SSH_CMD)
 
@@ -299,50 +319,34 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
 
         stdout_writer: io.Writer
         if !stdout_done {
-            if stdout_metatable == LUAFILE_HANDLE {
-                writer, mode, errno := lua_file_to_stream(L, stdout_idx)
-                stdout_writer = writer
-                if errno != .NONE {
-                    return lua_error_from_enum(L, errno)
-                }
-                if mode == posix.O_RDONLY {
-                    return lua.L_error(L, "stdout is not a writable file descriptor")
-                }
-            } else {
-                writer := Buffer_Writer {L, stdout_idx}
-                stdout_writer = io.Writer {
-                    procedure = buffer_writer_proc,
-                    data = &writer,
-                }
+            stdout_buf_writer: Buffer_Writer
+            writer, mode, errno := lua_stdio_to_writer(L, stdout_idx, &stdout_buf_writer, stdout_metatable)
+            stdout_writer = writer
+            if errno != .NONE {
+                return lua_error_from_enum(L, errno)
+            }
+            if mode == posix.O_RDONLY {
+                return lua.L_error(L, "stdout is not a writable file descriptor")
             }
         }
 
         stderr_writer: io.Writer
         if !stderr_done {
-            if stderr_metatable == LUAFILE_HANDLE {
-                writer, mode, errno := lua_file_to_stream(L, stderr_idx)
-                stderr_writer = writer
-                if errno != .NONE {
-                    return lua_error_from_enum(L, errno)
-                }
-                if mode == posix.O_RDONLY {
-                    return lua.L_error(L, "stderr is not a writable file descriptor")
-                }
-            } else {
-                writer := Buffer_Writer {L, stderr_idx}
-                stderr_writer = io.Writer {
-                    procedure = buffer_writer_proc,
-                    data = &writer,
-                }
+            stderr_buf_writer: Buffer_Writer
+            writer, mode, errno := lua_stdio_to_writer(L, stderr_idx, &stderr_buf_writer, stderr_metatable)
+            stdout_writer = writer
+            if errno != .NONE {
+                return lua_error_from_enum(L, errno)
+            }
+            if mode == posix.O_RDONLY {
+                return lua.L_error(L, "stderr is not a writable file descriptor")
             }
         }
-
 
         buf: [1024]u8 = ---
         n: c.int
         // TODO: handle io.write errors
         for !stdout_done || !stderr_done {
-
             if !stdout_done {
                 n = ssh.channel_read(channel, rawptr(&buf), len(buf), false)
                 if n <= 0 {
