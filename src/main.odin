@@ -64,7 +64,6 @@ lua_check :: proc "contextless" (L: ^lua.State, idx: lua.Index, name: cstring, a
     return type
 }
 
-
 lua_check_with_udata :: proc "contextless" (L: ^lua.State, idx: lua.Index, name: cstring, allowed_types: bit_set[lua.Type], msg: cstring, metatables := []cstring{}) -> (lua.Type, cstring) {
     type := lua_check(L, idx, name, allowed_types | {.USERDATA}, msg)
     if type != .USERDATA {
@@ -107,23 +106,6 @@ lua_tostring_pop :: proc "contextless" (L: ^lua.State) -> cstring {
     return s
 }
 
-// TODO: windows support
-is_file_readable :: proc "contextless" (fd: posix.FD) -> bool {
-    context = runtime.default_context()
-    flags := posix.fcntl(fd, .GETFL)
-    if flags == -1 {
-        fmt.println(posix.errno())
-        return false
-    }
-    access_mode := flags & c.int(posix.O_ACCMODE)
-
-    if access_mode == posix.O_RDONLY || access_mode == posix.O_RDWR {
-        return true
-    }
-
-    return false
-}
-
 lua_file_to_stream :: proc (L: ^lua.State, idx: lua.Index) -> (s: io.Stream, mode: c.int, err: posix.Errno) {
     cfile_ptr_ptr := cast(^^c.FILE) lua.touserdata(L, idx)
     fd := posix.fileno(cfile_ptr_ptr^)
@@ -133,8 +115,7 @@ lua_file_to_stream :: proc (L: ^lua.State, idx: lua.Index) -> (s: io.Stream, mod
         err = posix.get_errno()
         return
     }
-    mode = (flags & c.int(posix.O_ACCMODE))
-
+    mode = flags & c.int(posix.O_ACCMODE)
     file := os.new_file(uintptr(fd), "")
     s = os.to_stream(file)
     return
