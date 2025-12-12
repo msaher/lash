@@ -124,6 +124,46 @@ is_file_readable :: proc "contextless" (fd: posix.FD) -> bool {
     return false
 }
 
+lua_file_to_stream :: proc (L: ^lua.State, idx: lua.Index) -> (s: io.Stream, mode: c.int, err: posix.Errno) {
+    cfile_ptr_ptr := cast(^^c.FILE) lua.touserdata(L, idx)
+    fd := posix.fileno(cfile_ptr_ptr^)
+
+    flags := posix.fcntl(fd, .GETFL)
+    if flags == -1 {
+        err = posix.get_errno()
+        return
+    }
+    mode = (flags & c.int(posix.O_ACCMODE))
+
+    file := os.new_file(uintptr(fd), "")
+    s = os.to_stream(file)
+    return
+}
+
+Buffer_Writer :: struct {
+    L: ^lua.State,
+    idx: lua.Index,
+}
+
+buffer_writer_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
+    #partial switch mode {
+    case .Query:
+        return io.query_utility({.Write})
+    case .Write:
+        buffer_writer := cast(^Buffer_Writer) stream_data
+        L := buffer_writer.L
+        idx := buffer_writer.idx
+
+        lua.getfield(L, idx, "put")
+        lua.pushvalue(L, idx)
+        lua.pushlstring(L, cstring(raw_data(p)), len(p))
+        lua.call(L, 2, 0)
+        return i64(len(p)), nil
+    case:
+        return 0, .Empty
+    }
+}
+
 write_to_channel :: proc (reader: io.Reader, channel: ssh.Channel) -> (io.Error, c.int) {
     buf: [1024]u8 = ---
     loop: for {
@@ -178,10 +218,10 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
         }
         lua.pop(L, 1)
 
-        stdin_type, metatable := lua_check_with_udata(L, 1, "stdin", {.NIL, .STRING, .FUNCTION, .USERDATA}, "expected string, callback, buffer, or file", []cstring{"buffer", LUAFILE_HANDLE})
+        stdin_type, stdin_metatable := lua_check_with_udata(L, 1, "stdin", {.NIL, .STRING, .FUNCTION, .USERDATA}, "expected string, callback, buffer, or file", []cstring{"buffer", LUAFILE_HANDLE})
         stdin_bytes: [^]byte
         stdin_len: int
-        reader: io.Reader
+        stdin_reader: io.Reader
         is_reader: bool
         #partial switch stdin_type {
         case .STRING:
@@ -199,7 +239,7 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
             lua.pop(L, 1)
 
         case .USERDATA:
-            switch metatable {
+            switch stdin_metatable {
             case "buffer":
                 lua.getfield(L, -1, "ref")
                 lua.pushvalue(L, -2)
@@ -209,15 +249,14 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
                 lua.pop(L, 4) // buf, ref, bytes, len
 
             case LUAFILE_HANDLE:
-                cfile_ptr_ptr := cast(^^c.FILE) lua.touserdata(L, -1)
-                fd := posix.fileno(cfile_ptr_ptr^)
-                is_readable := is_file_readable(fd)
-                if !is_readable {
+                reader, mode, errno := lua_file_to_stream(L, -1)
+                stdin_reader = reader
+                if errno != .NONE {
+                    return lua_error_from_enum(L, errno)
+                }
+                if mode == posix.O_WRONLY {
                     return lua.L_error(L, "stdin is not a readable file descriptor")
                 }
-                file := os.new_file(uintptr(fd), "")
-                reader = os.to_reader(file)
-                is_reader = true
             }
         }
 
@@ -241,8 +280,8 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
             if status != ssh.OK {
                 return lua.L_error(L, "%s", ssh.get_error(session))
             }
-        } else if metatable == LUAFILE_HANDLE {
-            io_err, ssh_err := write_to_channel(reader, channel)
+        } else if stdin_metatable == LUAFILE_HANDLE {
+            io_err, ssh_err := write_to_channel(stdin_reader, channel)
             if io_err != .None {
                 return lua_error_from_enum(L, io_err)
             } else if ssh_err != ssh.OK {
@@ -250,39 +289,76 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
             }
         }
 
-        stdout_type, _ := lua_check_with_udata(L, 1, "stdout", {.NIL, .USERDATA}, "expected buffer", []cstring{"buffer"})
+        stdout_type, stdout_metatable := lua_check_with_udata(L, 1, "stdout", {.NIL, .USERDATA}, "expected buffer or file", []cstring{"buffer", LUAFILE_HANDLE})
         stdout_idx := lua.gettop(L)
-        stderr_type, _ := lua_check_with_udata(L, 1, "stderr", {.NIL, .USERDATA}, "expected buffer", []cstring{"buffer"})
+        stderr_type, stderr_metatable := lua_check_with_udata(L, 1, "stderr", {.NIL, .USERDATA}, "expected buffer or file", []cstring{"buffer", LUAFILE_HANDLE})
         stderr_idx := lua.gettop(L)
 
         stdout_done := stdout_type == .NIL
         stderr_done := stderr_type == .NIL || pty // ptys have stderr and stdout merged
+
+        stdout_writer: io.Writer
+        if !stdout_done {
+            if stdout_metatable == LUAFILE_HANDLE {
+                writer, mode, errno := lua_file_to_stream(L, stdout_idx)
+                stdout_writer = writer
+                if errno != .NONE {
+                    return lua_error_from_enum(L, errno)
+                }
+                if mode == posix.O_RDONLY {
+                    return lua.L_error(L, "stdout is not a writable file descriptor")
+                }
+            } else {
+                writer := Buffer_Writer {L, stdout_idx}
+                stdout_writer = io.Writer {
+                    procedure = buffer_writer_proc,
+                    data = &writer,
+                }
+            }
+        }
+
+        stderr_writer: io.Writer
+        if !stderr_done {
+            if stderr_metatable == LUAFILE_HANDLE {
+                writer, mode, errno := lua_file_to_stream(L, stderr_idx)
+                stderr_writer = writer
+                if errno != .NONE {
+                    return lua_error_from_enum(L, errno)
+                }
+                if mode == posix.O_RDONLY {
+                    return lua.L_error(L, "stderr is not a writable file descriptor")
+                }
+            } else {
+                writer := Buffer_Writer {L, stderr_idx}
+                stderr_writer = io.Writer {
+                    procedure = buffer_writer_proc,
+                    data = &writer,
+                }
+            }
+        }
+
+
         buf: [1024]u8 = ---
         n: c.int
+        // TODO: handle io.write errors
         for !stdout_done || !stderr_done {
 
             if !stdout_done {
                 n = ssh.channel_read(channel, rawptr(&buf), len(buf), false)
                 if n <= 0 {
+                    io.flush(stdout_writer)
                     stdout_done = true
                 }
-                // append
-                lua.getfield(L, stdout_idx, "put")
-                lua.pushvalue(L, stdout_idx)
-                lua.pushlstring(L, cstring(raw_data(buf[:n])), uint(n))
-                lua.call(L, 2, 0)
+                io.write(stdout_writer, buf[:n])
             }
 
             if !stderr_done {
                 n = ssh.channel_read(channel, rawptr(&buf), len(buf), true)
                 if n <= 0 {
+                    io.flush(stderr_writer)
                     stderr_done = true
                 }
-                // append
-                lua.getfield(L, stderr_idx, "put")
-                lua.pushvalue(L, stderr_idx)
-                lua.pushlstring(L, cstring(raw_data(buf[:n])), uint(n))
-                lua.call(L, 2, 0)
+                io.write(stderr_writer, buf[:n])
             }
         }
 
@@ -303,8 +379,7 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
         lua.pushstring(L, cstring(exit_signal))
         lua.setfield(L, -2, "exit_signal")
 
-        did_save_stderr := !lua.isnil(L, stderr_idx)
-        if did_save_stderr {
+        if stderr_metatable == "buffer" && !pty {
             lua.getfield(L, stderr_idx, "tostring")
             lua.pushvalue(L, stderr_idx)
             lua.call(L, 1, 1)
@@ -375,8 +450,8 @@ define_ssh_session_metatable :: proc(L: ^lua.State) {
             lua.pushvalue(L, 3) // [self, args, opts, cmd, opts]
             lua_check_and_set(L, "pty", {.NIL, .BOOLEAN}, "expected boolean")
             lua_check_and_set(L, "stdin", {.NIL, .STRING, .FUNCTION, .USERDATA}, "expected string, callback, buffer, or file", []cstring{"buffer", LUAFILE_HANDLE})
-            lua_check_and_set(L, "stdout", {.NIL, .USERDATA}, "expected buffer", metatables=[]cstring{"buffer"})
-            lua_check_and_set(L, "stderr", {.NIL, .USERDATA}, "expected buffer", metatables=[]cstring{"buffer"})
+            lua_check_and_set(L, "stdout", {.NIL, .USERDATA}, "expected buffer or file", metatables=[]cstring{"buffer", LUAFILE_HANDLE})
+            lua_check_and_set(L, "stderr", {.NIL, .USERDATA}, "expected buffer or file", metatables=[]cstring{"buffer", LUAFILE_HANDLE})
             lua.pop(L, 1) // pop opts
         }
 
