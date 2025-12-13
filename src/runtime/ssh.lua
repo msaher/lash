@@ -1,13 +1,32 @@
 local buffer = require("string.buffer")
 local SshCmd = lash._get_metatable("SshCmd").__index
 
---- @class lash.ssh.ExitState
+M = {}
+
+--- @class Session
+
+--- @class SessionCmd
+--- @field session Session
+--- @field args string[]
+--- @field stdout buffer?
+--- @field stderr buffer?
+--- @field stdin string?
+--- @field pty bool?
+
+--- @class ConnectOpts
+--- @field host string
+--- @field user string
+--- @field port number?
+--- @field auth AuthMethod
+
+--- @class ExitState
 --- @field exit_code? number
 --- @field exit_signal? string
 --- @field stderr? string
 
 --- @param opts { password: string }
-function ssh.AuthPassword(opts)
+--- @return AuthMethod
+function M.AuthPassword(opts)
     return {
         type = "password",
         password = opts.password,
@@ -15,7 +34,8 @@ function ssh.AuthPassword(opts)
 end
 
 --- @param opts { passphrase: string? }
-function ssh.AuthPublickey(opts)
+--- @return AuthMethod
+function M.AuthPublickey(opts)
     return {
         type = "publickey",
         passphrase = opts.passphrase
@@ -23,7 +43,8 @@ function ssh.AuthPublickey(opts)
 end
 
 --- @param opts { publickey: string, privatekey: string, passphrase: string?}
-function ssh.AuthPublickeyFile(opts)
+--- @return AuthMethod
+function M.AuthPublickeyFile(opts)
     return {
         type = "publickey_file",
         publickey = opts.publickey,
@@ -33,7 +54,8 @@ function ssh.AuthPublickeyFile(opts)
 end
 
 --- @param opts {}
-local function AuthAgent()
+--- @return AuthMethod
+function M.AuthAgent()
     return {
         type = "agent",
     }
@@ -65,3 +87,11 @@ function SshCmd:combined_output()
     local exit_state = self:run()
     return self.stdout:tostring(), exit_state
 end
+
+--- @param opts ConnectOpts
+--- @return Session
+function M.connect(opts)
+    return lash._ssh_connect(opts)
+end
+
+return M

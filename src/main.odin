@@ -884,10 +884,8 @@ entry_point :: proc() -> int {
     define_ssh_cmd_metatable(L)
     define_ssh_session_metatable(L)
 
-    lua.newtable(L) // [lash, ssh]
-    lua.pushcfunction(L, lash_ssh_connect) // [lash, ssh, connect]
-    lua.setfield(L, 2, "connect") // [lash, ssh]
-    lua.setfield(L, 1, "ssh") // [lash]
+    lua.pushcfunction(L, lash_ssh_connect)
+    lua.setfield(L, 1, "_ssh_connect")
 
     lua.pushcfunction(L, lash_get_metatable)
     lua.setfield(L, 1, "_get_metatable")
