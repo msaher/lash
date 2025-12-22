@@ -402,7 +402,7 @@ foreign ssh {
 	channel_request_x11			:: proc(channel: Channel, single_connection: c.int, protocol: cstring, cookie: cstring, screen_number: c.int) -> c.int ---
 	channel_request_auth_agent	:: proc(channel: Channel) -> c.int ---
 	channel_send_eof			:: proc(channel: Channel) -> c.int ---
-	channel_set_blocking		:: proc(channel: Channel, blocking: c.int) ---
+	channel_set_blocking		:: proc(channel: Channel, blocking: b32) ---
 	channel_set_counter			:: proc(channel: Channel, counter: Counter) ---
 	channel_write				:: proc(channel: Channel, data: rawptr, _len: c.uint32_t) -> c.int ---
 	channel_write_stderr		:: proc(channel: Channel, data: rawptr, _len: c.uint32_t) -> c.int ---
@@ -687,7 +687,7 @@ foreign ssh {
     service_request      :: proc(session: Session, service: cstring) -> c.int ---
     set_agent_channel    :: proc(session: Session, channel: Channel) -> c.int ---
     set_agent_socket     :: proc(session: Session, fd: Socket) -> c.int ---
-    set_blocking         :: proc(session: Session, blocking: c.int) ---
+    set_blocking         :: proc(session: Session, blocking: b32) ---
     set_counters         :: proc(session: Session, scounter: Counter, rcounter: Counter) ---
     set_fd_except        :: proc(session: Session) ---
     set_fd_toread        :: proc(session: Session) ---
