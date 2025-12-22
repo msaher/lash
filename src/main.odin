@@ -126,10 +126,12 @@ lua_file_to_stream :: proc (L: ^lua.State, idx: lua.Index) -> (s: io.Stream, mod
     return
 }
 
-Buffer_Writer :: struct {
+Lua_Stream_Data :: struct {
     L: ^lua.State,
     ref: c.int,
 }
+
+Buffer_Writer :: Lua_Stream_Data
 
 buffer_writer_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
     #partial switch mode {
@@ -153,9 +155,9 @@ buffer_writer_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte,
     }
 }
 
-buffer_writer_unref :: proc "contextless" (bw: ^Buffer_Writer) {
-    if bw.L != nil {
-        lua.L_unref(bw.L, lua.REGISTRYINDEX, bw.ref)
+lua_stream_data_unref :: proc "contextless" (data: ^Lua_Stream_Data) {
+    if data.L != nil {
+        lua.L_unref(data.L, lua.REGISTRYINDEX, data.ref)
     }
 }
 
@@ -185,24 +187,23 @@ write_to_channel :: proc (reader: io.Reader, channel: ssh.Channel) -> (io.Error,
     return .None, status
 }
 
-// TODO: use ref for file too
 // converts buffer or file to io.Writer
-lua_stdio_to_writer :: proc(L: ^lua.State, idx: lua.Index, buffer_writer: ^Buffer_Writer, metatable: cstring) -> (writer: io.Writer, mode: c.int, errno: posix.Errno) {
+lua_stdio_to_writer :: proc(L: ^lua.State, idx: lua.Index, data: ^Lua_Stream_Data, metatable: cstring) -> (writer: io.Writer, mode: c.int, errno: posix.Errno) {
+    data.L = L
+    lua.pushvalue(L, idx)
+    data.ref = lua.L_ref(L, lua.REGISTRYINDEX)
+    defer lua.pop(L, 1)
+
     switch metatable {
     case LUAFILE_HANDLE:
         writer, mode, errno = lua_file_to_stream(L, idx)
         return
     case "buffer":
         mode = -1
-        lua.pushvalue(L, idx)
-        ref := lua.L_ref(L, lua.REGISTRYINDEX)
-        buffer_writer.L = L
-        buffer_writer.ref = ref
         writer = io.Writer {
             procedure = buffer_writer_proc,
-            data = buffer_writer,
+            data = data,
         }
-        lua.pop(L,  1)
         return
     case:
         panic("unreachable")
@@ -393,8 +394,8 @@ ssh_cmd_gc :: proc "c" (L: ^lua.State) -> c.int {
 
     info := cast(^Channel_Info) lua.touserdata(L, -1)
     ssh.channel_free(info.channel)
-    buffer_writer_unref(&info.stdout_data)
-    buffer_writer_unref(&info.stderr_data)
+    lua_stream_data_unref(&info.stdout_data)
+    lua_stream_data_unref(&info.stderr_data)
 
     return 0
 }
