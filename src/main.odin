@@ -12,6 +12,7 @@ import "core:sys/posix"
 import "base:runtime"
 import "core:c/libc"
 import "core:io"
+import "core:slice"
 
 USAGE :: "run FILENAME"
 
@@ -28,11 +29,15 @@ lua_push_errmsg :: proc "contextless" (L: ^lua.State, msg: cstring) {
 }
 
 lua_error_from_enum :: proc "contextless" (L: ^lua.State, err: any) -> c.int {
+    lua_push_error_from_enum(L, err)
+    return lua.error(L)
+}
+
+lua_push_error_from_enum :: proc "contextless" (L: ^lua.State, err: any) {
     context = runtime.default_context()
     msg := fmt.caprint(err)
     lua_push_errmsg(L, msg)
     delete(msg)
-    return lua.error(L)
 }
 
 // check luajit's string.buffer
@@ -123,7 +128,7 @@ lua_file_to_stream :: proc (L: ^lua.State, idx: lua.Index) -> (s: io.Stream, mod
 
 Buffer_Writer :: struct {
     L: ^lua.State,
-    idx: lua.Index,
+    ref: c.int,
 }
 
 buffer_writer_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
@@ -133,15 +138,24 @@ buffer_writer_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte,
     case .Write:
         buffer_writer := cast(^Buffer_Writer) stream_data
         L := buffer_writer.L
-        idx := buffer_writer.idx
+        ref := buffer_writer.ref
 
-        lua.getfield(L, idx, "put")
-        lua.pushvalue(L, idx)
-        lua.pushlstring(L, cstring(raw_data(p)), len(p))
-        lua.call(L, 2, 0)
+        lua.rawgeti(L, lua.REGISTRYINDEX, lua.Integer(ref)) // [buf]
+        lua.getfield(L, -1, "put") //  [buf, put]
+        lua.pushvalue(L, -2) // [buf, put, buf]
+        lua.pushlstring(L, cstring(raw_data(p)), len(p)) // [buf, put, buf, string]
+        lua.call(L, 2, 0) // [buf, put]
+        lua.pop(L, 1) // []
+
         return i64(len(p)), nil
     case:
         return 0, .Empty
+    }
+}
+
+buffer_writer_unref :: proc "contextless" (bw: ^Buffer_Writer) {
+    if bw.L != nil {
+        lua.L_unref(bw.L, lua.REGISTRYINDEX, bw.ref)
     }
 }
 
@@ -159,8 +173,8 @@ write_to_channel :: proc (reader: io.Reader, channel: ssh.Channel) -> (io.Error,
 
         offset := 0
         for offset < bytes_read {
-            slice := buf[offset:bytes_read]
-            n := ssh.channel_write(channel, raw_data(slice), u32(len(slice)))
+            s := buf[offset:bytes_read]
+            n := ssh.channel_write(channel, raw_data(s), u32(len(s)))
             if n == ssh.ERROR {
                 return .None, ssh.ERROR
             }
@@ -171,6 +185,7 @@ write_to_channel :: proc (reader: io.Reader, channel: ssh.Channel) -> (io.Error,
     return .None, status
 }
 
+// TODO: use ref for file too
 // converts buffer or file to io.Writer
 lua_stdio_to_writer :: proc(L: ^lua.State, idx: lua.Index, buffer_writer: ^Buffer_Writer, metatable: cstring) -> (writer: io.Writer, mode: c.int, errno: posix.Errno) {
     switch metatable {
@@ -179,25 +194,29 @@ lua_stdio_to_writer :: proc(L: ^lua.State, idx: lua.Index, buffer_writer: ^Buffe
         return
     case "buffer":
         mode = -1
+        lua.pushvalue(L, idx)
+        ref := lua.L_ref(L, lua.REGISTRYINDEX)
         buffer_writer.L = L
-        buffer_writer.idx = idx
+        buffer_writer.ref = ref
         writer = io.Writer {
             procedure = buffer_writer_proc,
             data = buffer_writer,
         }
+        lua.pop(L,  1)
         return
     case:
         panic("unreachable")
     }
 }
 
-ssh_cmd_run :: proc "c" (L: ^lua.State) -> c.int {
+ssh_cmd_start :: proc "c" (L: ^lua.State) -> c.int {
     context = runtime.default_context()
-    lua.L_checktype(L, 1, .TABLE) // [self]
-    lua.getfield(L, 1, "session") // [self, session]
-    userdata := cast(^Session) lua.touserdata(L, -1)
-    session := userdata^
-    lua.pop(L, 1) // [self]
+    lua.L_checktype(L, 1, .TABLE)
+
+    lua_check_with_udata(L, 1, "session", {.USERDATA}, "expected SshSession", {METATABLE_SESSION})
+    session_ptr := cast(^Session) lua.touserdata(L, -1)
+    session := session_ptr^
+    lua.pop(L, 1)
 
     // self.args
     lua.getfield(L, 1, "args") // [self, args]
@@ -215,6 +234,7 @@ ssh_cmd_run :: proc "c" (L: ^lua.State) -> c.int {
     stdin_bytes: [^]byte
     stdin_len: int
     stdin_reader: io.Reader
+    // TODO: use io.Stream even in string
     #partial switch stdin_type {
     case .STRING:
         str := lua.tostring(L, -1)
@@ -252,15 +272,76 @@ ssh_cmd_run :: proc "c" (L: ^lua.State) -> c.int {
         }
     }
 
-    channel, err := session_exec_no_read(session, args, pty)
+    // create channel. No need to set it to "blocking" that's just a dumb
+    // confusing alias for making the session channel. There are no
+    // non-blocking channels. Only non-blocking session
+    channel, err := session_exec(session, args, pty)
     if err != .None {
         msg := ssh.get_error(session)
-        if msg != nil {
+        if msg != "" {
+            lua_push_errmsg(L, msg)
             return lua.error(L)
         } else {
             return lua_error_from_enum(L, err)
         }
     }
+    ssh.set_blocking(session, false)
+
+    info := cast(^Channel_Info) lua.newuserdata(L, size_of(Channel_Info))
+    channel_info_init(info)
+    info.channel = channel
+    lua.setfield(L, 1, "_channel_info")
+
+    set_stdio :: proc (L: ^lua.State, idx: lua.Index, bw: ^Buffer_Writer, metatable: cstring, name: cstring) -> (io.Writer, bool) {
+        writer, mode, errno := lua_stdio_to_writer(L, idx, bw, metatable)
+        if errno != .NONE {
+            lua_push_error_from_enum(L, errno)
+            return writer, false
+        }
+        if mode == posix.O_RDONLY {
+            lua.pushfstring(L, "%s is not a writable file descriptor", name)
+            return writer, false
+        }
+        return writer, true
+    }
+
+    stdout_type, stdout_metatable := lua_check_with_udata(L, 1, "stdout", {.NIL, .USERDATA}, "expected buffer or file", []cstring{"buffer", LUAFILE_HANDLE})
+    stdout_idx := lua.gettop(L)
+    stderr_type, stderr_metatable := lua_check_with_udata(L, 1, "stderr", {.NIL, .USERDATA}, "expected buffer or file", []cstring{"buffer", LUAFILE_HANDLE})
+    stderr_idx := lua.gettop(L)
+
+    stdout_done := stdout_type == .NIL
+    stderr_done := stderr_type == .NIL || pty // ptys have stderr and stdout merged
+
+    if !stdout_done {
+        ok: bool
+        info.stdout_writer, ok = set_stdio(L, stdout_idx, &info.stdout_data, stdout_metatable, "stdout")
+        if !ok do lua.error(L)
+    }
+
+    if !stderr_done {
+        ok: bool
+        info.stderr_writer, ok = set_stdio(L, stderr_idx, &info.stderr_data, stderr_metatable, "stderr")
+        if !ok do lua.error(L)
+    }
+
+    on_data :: proc "c" (_: ssh.Session, _: ssh.Channel, data: rawptr, len: c.uint32_t, is_stderr: b32, userdata: rawptr) -> c.int {
+        context = runtime.default_context()
+        info := cast(^Channel_Info) userdata
+        writer: io.Writer
+        if is_stderr {
+            writer = info.stderr_writer
+        } else {
+            writer = info.stdout_writer
+        }
+        data_byte_ptr := cast(^byte) data
+        buf := slice.from_ptr(data_byte_ptr, int(len))
+        n, _ := io.write(writer, buf)
+        return c.int(n)
+    }
+
+    info.callbacks.channel_data_function = on_data
+    ssh.set_channel_callbacks(channel, &info.callbacks)
 
     // write stdin, if any
     if stdin_bytes != nil {
@@ -281,95 +362,41 @@ ssh_cmd_run :: proc "c" (L: ^lua.State) -> c.int {
         }
     }
 
-    stdout_type, stdout_metatable := lua_check_with_udata(L, 1, "stdout", {.NIL, .USERDATA}, "expected buffer or file", []cstring{"buffer", LUAFILE_HANDLE})
-    stdout_idx := lua.gettop(L)
-    stderr_type, stderr_metatable := lua_check_with_udata(L, 1, "stderr", {.NIL, .USERDATA}, "expected buffer or file", []cstring{"buffer", LUAFILE_HANDLE})
-    stderr_idx := lua.gettop(L)
+    return 0
+}
 
-    stdout_done := stdout_type == .NIL
-    stderr_done := stderr_type == .NIL || pty // ptys have stderr and stdout merged
+ssh_cmd_wait :: proc "c" (L: ^lua.State) -> c.int {
+    context = runtime.default_context()
+    lua.L_checktype(L, 1, .TABLE)
+    lua_check(L, 1, "_channel_info", {.USERDATA}, "Somebody touched internals! Moron")
+    info := cast(^Channel_Info) lua.touserdata(L, -1)
 
-    stdout_writer: io.Writer
-    if !stdout_done {
-        stdout_buf_writer: Buffer_Writer
-        writer, mode, errno := lua_stdio_to_writer(L, stdout_idx, &stdout_buf_writer, stdout_metatable)
-        stdout_writer = writer
-        if errno != .NONE {
-            return lua_error_from_enum(L, errno)
-        }
-        if mode == posix.O_RDONLY {
-            return lua.L_error(L, "stdout is not a writable file descriptor")
-        }
+    for !ssh.channel_is_eof(info.channel) {
+        ssh.channel_poll(info.channel, false)
+        ssh.channel_poll(info.channel, true)
     }
 
-    stderr_writer: io.Writer
-    if !stderr_done {
-        stderr_buf_writer: Buffer_Writer
-        writer, mode, errno := lua_stdio_to_writer(L, stderr_idx, &stderr_buf_writer, stderr_metatable)
-        stdout_writer = writer
-        if errno != .NONE {
-            return lua_error_from_enum(L, errno)
-        }
-        if mode == posix.O_RDONLY {
-            return lua.L_error(L, "stderr is not a writable file descriptor")
-        }
+    return 0
+}
+
+ssh_cmd_run :: proc "c" (L: ^lua.State) -> c.int {
+    ssh_cmd_start(L)
+    ssh_cmd_wait(L)
+    return 0
+}
+
+ssh_cmd_gc :: proc "c" (L: ^lua.State) -> c.int {
+    type := lua_check(L, 1, "_channel_info", {.USERDATA, .NIL}, "Somebody touched internals! Moron")
+    if type == .NIL {
+        return 0
     }
 
-    buf: [1024]u8 = ---
-    n: c.int
-    // TODO: handle io.write errors
-    for !stdout_done || !stderr_done {
-        if !stdout_done {
-            n = ssh.channel_read(channel, rawptr(&buf), len(buf), false)
-            if n <= 0 {
-                io.flush(stdout_writer)
-                stdout_done = true
-            }
-            io.write(stdout_writer, buf[:n])
-        }
+    info := cast(^Channel_Info) lua.touserdata(L, -1)
+    ssh.channel_free(info.channel)
+    buffer_writer_unref(&info.stdout_data)
+    buffer_writer_unref(&info.stderr_data)
 
-        if !stderr_done {
-            n = ssh.channel_read(channel, rawptr(&buf), len(buf), true)
-            if n <= 0 {
-                io.flush(stderr_writer)
-                stderr_done = true
-            }
-            io.write(stderr_writer, buf[:n])
-        }
-    }
-
-    exit_code: c.uint32_t = ---
-    exit_signal: [^]u8 = ---
-    status := ssh.channel_get_exit_state(channel, &exit_code, &exit_signal, nil)
-    ssh.channel_close(channel)
-    ssh.channel_free(channel)
-
-    if status != ssh.OK {
-        return lua.L_error(L, "%s", ssh.get_error(session))
-    }
-
-    // exit_state (to be returned)
-    lua.newtable(L)
-    lua.pushinteger(L, lua.Integer(exit_code))
-    lua.setfield(L, -2, "exit_code")
-    lua.pushstring(L, cstring(exit_signal))
-    lua.setfield(L, -2, "exit_signal")
-
-    if stderr_metatable == "buffer" && !pty {
-        lua.getfield(L, stderr_idx, "tostring")
-        lua.pushvalue(L, stderr_idx)
-        lua.call(L, 1, 1)
-        lua.setfield(L, -2, "stderr")
-    }
-
-    // save reference to exit_state in self
-    lua.pushvalue(L, -2)
-    lua.setfield(L, 1, "exit_state")
-
-    if exit_signal != nil {
-        libc.free(exit_signal)
-    }
-    return 1
+    return 0
 }
 
 define_ssh_cmd_metatable :: proc(L: ^lua.State) {
@@ -380,6 +407,13 @@ define_ssh_cmd_metatable :: proc(L: ^lua.State) {
 
     lua.pushcfunction(L, ssh_cmd_run)
     lua.setfield(L, -2, "run")
+
+    lua.pushcfunction(L, ssh_cmd_start)
+    lua.setfield(L, -2, "start")
+
+    lua.pushcfunction(L, ssh_cmd_wait)
+    lua.setfield(L, -2, "wait")
+
 
     lua.setfield(L, -2, "__index")
     lua.pop(L, 1) // pop metatable
@@ -485,8 +519,8 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
         _, privatekey := lua_check(L, -1, "privatekey", {.STRING}, "expected string"), lua_tostring_pop(L)
 
         starts_with_tilde :: #force_inline proc "contextless" (str: cstring) -> bool {
-            slice := cast([^]u8)str
-            return slice[0] == '~'
+            s := cast([^]u8)str
+            return s[0] == '~'
         }
 
         // calls string.gsub(str, "^~", home)
@@ -575,6 +609,27 @@ lash_ssh_connect :: proc "c" (L: ^lua.State) -> c.int {
 
 // a connected, authenticated ssh.Session
 Session :: ssh.Session
+
+// A channel along with its callbacks
+Channel_Info :: struct {
+    channel: ssh.Channel,
+    callbacks: ssh.Channel_Callbacks_Struct,
+    stdout_writer: io.Writer,
+    stderr_writer: io.Writer,
+    // a place for the buffer_writer struct to live in case io.Writer is a buffer
+    stdout_data: Buffer_Writer,
+    stderr_data: Buffer_Writer,
+}
+
+channel_info_init :: proc (info: ^Channel_Info) {
+    // zero out callbacks or you'll call nonsense
+    // Took me a while to figure the cause of those segfaults :(
+    info.callbacks = ssh.Channel_Callbacks_Struct{}
+    ssh.callbacks_init(&info.callbacks)
+    info.callbacks.userdata = info
+    info.stdout_writer = discard_stream
+    info.stderr_writer = discard_stream
+}
 
 // TODO: add AUTH_AGAIN
 Make_Session_Error :: enum {
@@ -739,7 +794,7 @@ Session_Exec_Error :: enum {
 }
 
 // must close and free channel
-session_exec_no_read :: proc "contextless" (session: ssh.Session, cmd: cstring, want_pty: b32) -> (ssh.Channel, Session_Exec_Error) {
+session_exec :: proc "contextless" (session: ssh.Session, cmd: cstring, want_pty: b32) -> (ssh.Channel, Session_Exec_Error) {
     channel := ssh.channel_new(session)
     if channel == nil {
         return nil, .Cant_Create_Channel
