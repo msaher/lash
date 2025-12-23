@@ -278,7 +278,7 @@ ssh_cmd_start :: proc "c" (L: ^lua.State) -> c.int {
     #partial switch stdin_type {
     case .STRING:
         str := lua.tostring(L, -1)
-        stdin_bytes, stdin_len = transmute([^]u8) str, len(str)
+        stdin_bytes, stdin_len = cast([^]u8) str, len(str)
         lua.pop(L, 1)
 
     case .FUNCTION:
@@ -287,7 +287,7 @@ ssh_cmd_start :: proc "c" (L: ^lua.State) -> c.int {
             return lua.L_error(L, "stdin callback: expected to return string, returned %s", lua.L_typename(L, -1))
         }
         str := lua.tostring(L, -1)
-        stdin_bytes, stdin_len = transmute([^]u8) str, len(str)
+        stdin_bytes, stdin_len = cast([^]u8) str, len(str)
         lua.pop(L, 1)
 
     case .USERDATA:
@@ -297,7 +297,7 @@ ssh_cmd_start :: proc "c" (L: ^lua.State) -> c.int {
             lua.pushvalue(L, -2)
             lua.call(L, 1, 2)
             stdin_len = int(lua.tointeger(L, -1))
-            stdin_bytes = transmute([^]u8) lua.tostring(L, -2)
+            stdin_bytes = cast([^]u8) lua.tostring(L, -2)
             lua.pop(L, 4) // buf, ref, bytes, len
 
         case LUAFILE_HANDLE:

@@ -6,18 +6,11 @@ import os "core:os/os2"
 import "core:bufio"
 import lua "luajit"
 import "luv"
-import "ssh"
 import "core:c"
 import "core:sys/posix"
 import "base:runtime"
-import "core:c/libc"
-import "core:io"
-import "core:slice"
 
 USAGE :: "run FILENAME"
-
-METATABLE_SESSION :: "SshSession"
-METATABLE_SSH_CMD :: "SshCmd"
 
 lash_input :: proc "c" (L: ^lua.State) -> c.int {
     num_args := lua.gettop(L)
@@ -135,7 +128,8 @@ entry_point :: proc() -> int {
     lua.setfield(L, -2, "luv");    // [lash, uv, package, loaded]
     lua.pop(L, 3);                 // [lash]
 
-    // metatable
+    // define metatables
+    define_cmd_metatable(L)
     define_ssh_cmd_metatable(L)
     define_ssh_session_metatable(L)
 
