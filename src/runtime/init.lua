@@ -1,9 +1,4 @@
--- initialized once lash runs
--- lots of functions taken from neovim's stdlib
--- TODO: add license if needed
-
 lash.inspect = require("inspect")
-lash.proc = require("proc")
 
 local function _print(inspect_strings, ...)
   local msg = {}
@@ -42,4 +37,3 @@ function lash.list_slice(list, start, finish)
   return new_list
 end
 
-require("ssh")

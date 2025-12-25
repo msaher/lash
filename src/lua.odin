@@ -7,6 +7,7 @@ import "core:fmt"
 import "core:sys/posix"
 import "core:io"
 import os "core:os/os2"
+import "core:strings"
 
 
 // metatable name for lua files
@@ -101,7 +102,7 @@ lua_tostring_pop :: proc "contextless" (L: ^lua.State) -> cstring {
     return s
 }
 
-lua_file_to_stream :: proc (L: ^lua.State, idx: lua.Index) -> (s: io.Stream, mode: c.int, err: posix.Errno) {
+lua_file_to_odin_file :: proc (L: ^lua.State, idx: lua.Index) -> (file: ^os.File, mode: c.int, err: posix.Errno) {
     cfile_ptr_ptr := cast(^^c.FILE) lua.touserdata(L, idx)
     fd := posix.fileno(cfile_ptr_ptr^)
 
@@ -111,8 +112,14 @@ lua_file_to_stream :: proc (L: ^lua.State, idx: lua.Index) -> (s: io.Stream, mod
         return
     }
     mode = flags & c.int(posix.O_ACCMODE)
-    file := os.new_file(uintptr(fd), "")
-    s = os.to_stream(file)
+    file = os.new_file(uintptr(fd), "")
+    return
+}
+
+lua_file_to_stream :: proc (L: ^lua.State, idx: lua.Index) -> (stream: io.Stream, mode: c.int, err: posix.Errno) {
+    file: ^os.File
+    file, mode, err = lua_file_to_odin_file(L,  idx)
+    stream = os.to_stream(file)
     return
 }
 
@@ -123,7 +130,8 @@ Lua_Stream_Data :: struct {
 
 Buffer_Writer :: Lua_Stream_Data
 
-buffer_writer_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
+// can also be used as a os.File
+buffer_writer_stream_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
     #partial switch mode {
     case .Query:
         return io.query_utility({.Write})
@@ -143,6 +151,29 @@ buffer_writer_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte,
     case:
         return 0, .Empty
     }
+}
+
+buffer_writer_to_stream :: proc(bw: ^Buffer_Writer) -> io.Stream {
+    return io.Stream {
+        data = bw,
+        procedure = buffer_writer_stream_proc,
+    }
+}
+
+buffer_writer_file_proc :: proc(
+    stream_data: rawptr,
+    mode:        os.File_Stream_Mode,
+    p:           []byte,
+    offset:      i64,
+    whence:      io.Seek_From,
+    allocator:   runtime.Allocator,
+) -> (n: i64, err: os.Error) {
+    if mode == .Fstat {
+        return 0, .Empty
+    }
+    stream_mode := transmute(io.Stream_Mode)mode
+
+    return buffer_writer_stream_proc(stream_data, stream_mode, p, offset, whence)
 }
 
 lua_stream_data_unref :: proc "contextless" (data: ^Lua_Stream_Data) {
@@ -165,11 +196,18 @@ lua_stdio_to_writer :: proc(L: ^lua.State, idx: lua.Index, data: ^Lua_Stream_Dat
     case "buffer":
         mode = -1
         writer = io.Writer {
-            procedure = buffer_writer_proc,
+            procedure = buffer_writer_stream_proc,
             data = data,
         }
         return
     case:
         panic("unreachable")
     }
+}
+
+lua_to_odin_string :: proc(L: ^lua.State, idx: lua.Index) -> string {
+    cstr := lua.tostring(L, idx)
+    ptr := cast(^byte) cstr
+    s := strings.string_from_ptr(ptr, len(cstr))
+    return s
 }

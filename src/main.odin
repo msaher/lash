@@ -129,7 +129,7 @@ entry_point :: proc() -> int {
     lua.pop(L, 3);                 // [lash]
 
     // define metatables
-    define_cmd_metatable(L)
+    // define_cmd_metatable(L)
     define_ssh_cmd_metatable(L)
     define_ssh_session_metatable(L)
 
